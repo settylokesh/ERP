@@ -726,6 +726,13 @@ export function convertDraft(fromId: number, toType: string, opts: Row = {}): Do
     contact_id = opts.vendor_id ?? null;
     refDocId = src.id;
   }
+  if (DOC_TYPES[toType].priced && !DOC_TYPES[src.type].priced) {
+    // Unpriced sources (sales returns, receives) take price and GST from the priced line they came from.
+    lines = lines.map((l) => {
+      const anc = pricedAncestor(l.ref_line_id ?? null);
+      return anc ? { ...l, rate: anc.rate, discount_pct: anc.discount_pct, tax_id: anc.tax_id, tax_exempt: anc.tax_exempt, account_id: anc.account_id ?? l.account_id } : l;
+    });
+  }
   const keepPrices = ['quote', 'sales_order', 'invoice', 'purchase_order', 'bill', 'delivery_challan', 'credit_note', 'vendor_credit'].includes(toType);
   return {
     type: toType,
@@ -745,6 +752,17 @@ export function convertDraft(fromId: number, toType: string, opts: Row = {}): Do
     data: toType === 'invoice' && srcData.shipping_address ? { shipping_address: srcData.shipping_address } : {},
     lines: keepPrices ? lines : lines.map((l) => ({ ...l, rate: toType === 'purchase_receive' || toType === 'package' ? 0 : l.rate })),
   };
+}
+
+function pricedAncestor(lineId: number | null): Row | null {
+  let id = lineId;
+  for (let i = 0; id && i < 4; i++) {
+    const l = db().get<Row>('SELECT l.*, d.type FROM document_lines l JOIN documents d ON d.id = l.document_id WHERE l.id = ?', id);
+    if (!l) return null;
+    if (DOC_TYPES[l.type]?.priced) return l;
+    id = l.ref_line_id;
+  }
+  return null;
 }
 
 export function createFrom(fromId: number, toType: string, user: AuthUser | undefined, overrides: Row = {}, submit = true) {

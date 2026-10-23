@@ -1,10 +1,14 @@
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as DatabaseSyncT, StatementSync } from 'node:sqlite';
 import { SCHEMA } from './schema.js';
 
 // Rows are dynamic SQL results; a loose type keeps spreads and joins ergonomic.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Row = any;
 type Param = string | number | bigint | null | Uint8Array;
+
+// Loaded through require so test bundlers (which do not know the newer node:sqlite builtin) leave it alone.
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 
 export class HttpError extends Error {
   constructor(public status: number, message: string, public details?: unknown) {
@@ -24,7 +28,7 @@ function clean(v: unknown): Param {
 }
 
 export class DB {
-  readonly raw: DatabaseSync;
+  readonly raw: DatabaseSyncT;
   private cache = new Map<string, StatementSync>();
   private depth = 0;
 
