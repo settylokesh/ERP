@@ -122,7 +122,7 @@ function View() {
         <div className="card p-4"><KeyVal items={[['Type', a.type_name], ['Method', a.method === 'slm' ? `Straight line over ${a.useful_life_months} months` : `WDV at ${a.wdv_rate}% p.a.`], ['Purchased', date(a.purchase_date)], ['Depreciation from', date(a.depreciation_start)], ['Salvage value', money(a.salvage_value)], ['Serial #', a.serial_no], ['Location', a.location], ['Disposed', a.disposal_date ? `${date(a.disposal_date)} for ${money(a.disposal_amount)}` : null]]} /></div>
         <div className="card overflow-x-auto p-4"><h3 className="mb-2">Depreciation schedule</h3>
           <table className="table"><thead><tr><th>Period</th><th className="num">Depreciation</th><th className="num">Book value</th><th>Status</th></tr></thead>
-            <tbody>{a.schedule.slice(0, 120).map((s: any) => <tr key={s.period_end}><td>{s.period_end.slice(0, 7)}</td><td className="num">{money(s.amount)}</td><td className="num">{money(s.book_value)}</td><td>{s.posted ? <Badge status="paid" label="Posted" /> : <span className="text-xs text-slate-400">Scheduled</span>}</td></tr>)}</tbody></table>
+            <tbody>{a.schedule.slice(0, 120).map((s: any) => <tr key={s.period_end}><td>{s.period_end.slice(0, 7)}</td><td className="num">{money(s.amount)}</td><td className="num">{money(s.book_value)}</td><td>{s.posted ? <Badge status="paid" label="Posted" /> : <span className="text-xs text-slate-500">Scheduled</span>}</td></tr>)}</tbody></table>
         </div>
       </div>
       {dispose && (

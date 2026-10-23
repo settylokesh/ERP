@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL COLLATE NOCASE,
   password_hash TEXT NOT NULL, role_id INTEGER NOT NULL REFERENCES roles(id),
-  is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  is_active INTEGER NOT NULL DEFAULT 1, must_change_password INTEGER NOT NULL DEFAULT 0, last_login_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -40,7 +41,7 @@ CREATE TABLE IF NOT EXISTS tds_sections (
 );
 
 CREATE TABLE IF NOT EXISTS warehouses (
-  id INTEGER PRIMARY KEY, name TEXT NOT NULL, code TEXT, address TEXT, state_code TEXT, gstin TEXT,
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, code TEXT, address TEXT, city TEXT, pincode TEXT, state_code TEXT, gstin TEXT,
   is_primary INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1
 );
 
@@ -57,7 +58,8 @@ CREATE TABLE IF NOT EXISTS price_list_items (
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('customer','vendor')), name TEXT NOT NULL,
   company_name TEXT, email TEXT, phone TEXT, gst_treatment TEXT NOT NULL DEFAULT 'business_gst', gstin TEXT, pan TEXT,
-  place_of_supply TEXT, billing_address TEXT, shipping_address TEXT, payment_terms INTEGER NOT NULL DEFAULT 0,
+  place_of_supply TEXT, billing_address TEXT, billing_city TEXT, billing_pincode TEXT, billing_state TEXT, billing_country TEXT,
+  shipping_address TEXT, shipping_city TEXT, shipping_pincode TEXT, shipping_state TEXT, payment_terms INTEGER NOT NULL DEFAULT 0,
   currency_code TEXT NOT NULL DEFAULT 'INR', credit_limit REAL, price_list_id INTEGER REFERENCES price_lists(id),
   opening_balance REAL NOT NULL DEFAULT 0, tds_section_id INTEGER REFERENCES tds_sections(id),
   notes TEXT, is_active INTEGER NOT NULL DEFAULT 1, custom TEXT NOT NULL DEFAULT '{}',
@@ -185,7 +187,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE TABLE IF NOT EXISTS email_outbox (
   id INTEGER PRIMARY KEY, to_addr TEXT NOT NULL, subject TEXT NOT NULL, body TEXT, entity TEXT, entity_id INTEGER,
-  status TEXT NOT NULL DEFAULT 'queued', at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  status TEXT NOT NULL DEFAULT 'queued', error TEXT, sent_at TEXT, at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS approval_history (
   id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id INTEGER NOT NULL, level INTEGER NOT NULL DEFAULT 0,
@@ -327,7 +329,8 @@ CREATE TABLE IF NOT EXISTS employees (
   designation_id INTEGER REFERENCES designations(id), work_state TEXT, pan TEXT, uan TEXT, esi_number TEXT,
   bank_name TEXT, bank_account TEXT, ifsc TEXT, annual_ctc REAL NOT NULL DEFAULT 0, components TEXT NOT NULL DEFAULT '{}',
   pf_enabled INTEGER NOT NULL DEFAULT 1, esi_enabled INTEGER NOT NULL DEFAULT 1, pt_enabled INTEGER NOT NULL DEFAULT 1,
-  tds_enabled INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  tds_enabled INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active',
+  ytd_fy TEXT, ytd_gross REAL NOT NULL DEFAULT 0, ytd_tds REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS salary_components (
   id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'earning',

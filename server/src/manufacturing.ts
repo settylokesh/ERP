@@ -458,6 +458,9 @@ export function recordInspection(id: number, input: Row, user?: AuthUser) {
     const d = db();
     const qi = d.get<Row>('SELECT * FROM quality_inspections WHERE id = ?', id) ?? fail('Inspection not found', 404);
     if (qi.status !== 'pending') fail('This inspection is already recorded', 422);
+    if (qi.source_type === 'purchase_receive' && d.value<string>('SELECT status FROM documents WHERE id = ?', qi.source_id) !== 'pending_inspection') {
+      fail('The receive for this inspection is no longer awaiting inspection', 422);
+    }
     const accepted = Number(input.accepted_qty), rejected = Number(input.rejected_qty ?? qi.qty - accepted);
     if (!(accepted >= 0 && rejected >= 0) || Math.abs(accepted + rejected - qi.qty) > 1e-9) fail(`Accepted + rejected must equal the inspected quantity (${qi.qty})`, 422);
     const rules = d.all<Row>("SELECT * FROM quality_rules WHERE item_id = ? AND is_active = 1", qi.item_id).flatMap((r) => json<Row[]>(r.parameters, []));

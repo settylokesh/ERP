@@ -1,7 +1,7 @@
 import { audit } from './activity.js';
 import type { AuthUser } from './auth.js';
 import { db, fail, json, type Row } from './db.js';
-import { acct, accountBalance, categoryOf, journalsFor, normaliseLines, replaceJournal, type JLine } from './ledger.js';
+import { acct, accountBalance, assertNotReconciled, categoryOf, journalsFor, normaliseLines, replaceJournal, syncBankMatches, type JLine } from './ledger.js';
 import { assertUnlocked, nextNumber, org } from './settings.js';
 import { addMonths, fiscalYear, isDate, monthEnd, r2, today } from './util.js';
 
@@ -36,7 +36,7 @@ export function saveManualJournal(input: Row, user?: AuthUser, id?: number) {
     if (id) {
       const j = d.get<Row>('SELECT * FROM journals WHERE id = ? AND is_manual = 1', id) ?? fail('Journal not found', 404);
       assertUnlocked('accountant', j.date, 'journal');
-      if (d.get('SELECT 1 FROM journal_lines WHERE journal_id = ? AND recon_id IS NOT NULL', id)) fail('This journal has reconciled bank lines. Undo the reconciliation first.', 422);
+      assertNotReconciled('manual_journal', id, 'edit');
       d.update('journals', id, { date, reference: input.reference ?? null, memo: input.memo ?? null, status });
       d.run('DELETE FROM journal_lines WHERE journal_id = ?', id);
     } else {
@@ -44,19 +44,22 @@ export function saveManualJournal(input: Row, user?: AuthUser, id?: number) {
       d.update('journals', jid!, { source_id: jid });
     }
     for (const l of lines) d.insert('journal_lines', { journal_id: jid, ...l });
+    syncBankMatches('manual_journal', jid!);
     audit('journal', jid!, id ? 'updated' : 'created', `Manual journal ${id ? 'updated' : 'created'} (${status})`, user);
     return jid!;
   });
 }
 
 export function deleteManualJournal(id: number, user?: AuthUser) {
-  const d = db();
-  const j = d.get<Row>('SELECT * FROM journals WHERE id = ? AND is_manual = 1', id) ?? fail('Journal not found', 404);
-  assertUnlocked('accountant', j.date, 'journal');
-  if (d.get('SELECT 1 FROM journal_lines WHERE journal_id = ? AND recon_id IS NOT NULL', id)) fail('Undo the bank reconciliation first', 422);
-  d.run("UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL WHERE matched_source_type = 'manual_journal' AND matched_source_id = ?", id);
-  d.run('DELETE FROM journals WHERE id = ?', id);
-  audit('journal', id, 'deleted', `Manual journal ${j.number} deleted`, user);
+  db().tx(() => {
+    const d = db();
+    const j = d.get<Row>('SELECT * FROM journals WHERE id = ? AND is_manual = 1', id) ?? fail('Journal not found', 404);
+    assertUnlocked('accountant', j.date, 'journal');
+    assertNotReconciled('manual_journal', id, 'delete');
+    d.run('DELETE FROM journals WHERE id = ?', id);
+    syncBankMatches('manual_journal', id);
+    audit('journal', id, 'deleted', `Manual journal ${j.number} deleted`, user);
+  });
 }
 
 export function reverseManualJournal(id: number, date: string, user?: AuthUser) {

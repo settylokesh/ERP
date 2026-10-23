@@ -10,27 +10,8 @@ const TITLES: Record<string, string> = {
   rfq: 'REQUEST FOR QUOTATION', expense: 'EXPENSE VOUCHER', inventory_adjustment: 'INVENTORY ADJUSTMENT', stock_count: 'STOCK COUNT SHEET',
 };
 
-function words(n: number) {
-  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-  const two = (x: number) => (x < 20 ? ones[x] : `${tens[Math.floor(x / 10)]}${x % 10 ? ' ' + ones[x % 10] : ''}`);
-  const three = (x: number) => [Math.floor(x / 100) ? `${ones[Math.floor(x / 100)]} Hundred` : '', x % 100 ? two(x % 100) : ''].filter(Boolean).join(' ');
-  const w = (x: number): string => {
-    if (!x) return 'Zero';
-    const p: string[] = [];
-    const cr = Math.floor(x / 1e7); x %= 1e7;
-    const lk = Math.floor(x / 1e5); x %= 1e5;
-    const th = Math.floor(x / 1e3); x %= 1e3;
-    if (cr) p.push(`${w(cr)} Crore`);
-    if (lk) p.push(`${two(lk)} Lakh`);
-    if (th) p.push(`${two(th)} Thousand`);
-    if (x) p.push(three(x));
-    return p.join(' ');
-  };
-  const abs = Math.abs(Math.round(n * 100) / 100);
-  const r = Math.floor(abs), paise = Math.round((abs - r) * 100);
-  return `Indian Rupee ${w(r)}${paise ? ` and ${two(paise)} Paise` : ''} Only`;
-}
+const address = (text?: string | null, city?: string | null, pin?: string | null, state?: string | null, states?: Record<string, string>) =>
+  [text, [city, pin].filter(Boolean).join(' - '), state && states?.[state]].filter(Boolean).join('\n');
 
 export default function PrintDoc({ doc }: { doc: any }) {
   const { meta } = useMeta();
@@ -64,7 +45,7 @@ export default function PrintDoc({ doc }: { doc: any }) {
         </div>
       </div>
       {e?.status === 'generated' && (
-        <div className="mt-2 break-all rounded bg-slate-50 p-2 text-[11px]"><b>IRN:</b> {e.irn} · <b>Ack No:</b> {e.ack_no} · <b>Ack Date:</b> {date(e.ack_date)}{e.sandbox && ' · (sandbox)'}</div>
+        <div className="mt-2 break-all rounded bg-slate-50 p-2 text-[11px]"><b>IRN:</b> {e.irn} · <b>Ack No:</b> {e.ack_no} · <b>Ack Date:</b> {date(e.ack_date)}</div>
       )}
       <div className="grid gap-6 py-4 sm:grid-cols-2">
         <div>
@@ -72,9 +53,9 @@ export default function PrintDoc({ doc }: { doc: any }) {
             <>
               <div className="text-[11px] font-semibold uppercase text-slate-500">{def.party === 'vendor' ? 'Vendor' : 'Bill To'}</div>
               <div className="font-semibold">{c.company_name || c.name}</div>
-              <div className="whitespace-pre-line text-slate-600">{c.billing_address}</div>
+              <div className="whitespace-pre-line text-slate-600">{address(c.billing_address, c.billing_city, c.billing_pincode, c.billing_state, meta.states)}</div>
               {c.gstin && <div>GSTIN: {c.gstin}</div>}
-              {c.shipping_address && def.party === 'customer' && <><div className="mt-2 text-[11px] font-semibold uppercase text-slate-500">Ship To</div><div className="whitespace-pre-line text-slate-600">{c.shipping_address}</div></>}
+              {c.shipping_address && def.party === 'customer' && <><div className="mt-2 text-[11px] font-semibold uppercase text-slate-500">Ship To</div><div className="whitespace-pre-line text-slate-600">{address(c.shipping_address, c.shipping_city, c.shipping_pincode, c.shipping_state, meta.states)}</div></>}
             </>
           )}
           {doc.type === 'transfer_order' && <div>From <b>{doc.warehouse_name}</b> to <b>{doc.to_warehouse_name}</b></div>}
@@ -125,7 +106,8 @@ export default function PrintDoc({ doc }: { doc: any }) {
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:justify-between">
           <div className="max-w-sm text-slate-600">
             <div className="text-[11px] font-semibold uppercase text-slate-500">Total in words</div>
-            <div className="italic">{doc.currency_code === 'INR' ? words(doc.total) : `${doc.currency_code} ${doc.total} (≈ ${money(doc.total * doc.exchange_rate)} at ${doc.exchange_rate})`}</div>
+            <div className="italic">{doc.amount_in_words}</div>
+            {doc.currency_code !== 'INR' && <div className="mt-1 text-[11px]">≈ {money(doc.total * doc.exchange_rate)} at ₹{doc.exchange_rate} per {doc.currency_code}</div>}
           </div>
           <div className="w-full max-w-xs space-y-1">
             <div className="flex justify-between"><span>Sub Total</span><span>{money(doc.taxable_total, sym)}</span></div>

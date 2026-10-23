@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { del, post, put } from '../api';
 import { DataTable } from '../components/DataTable';
 import { ContactPicker, ItemPicker, TaxSelect } from '../components/pickers';
-import { Badge, Check, Field, Input, Modal, PageHeader, Select, useAction } from '../components/ui';
+import { Badge, Check, Field, Input, Modal, PageHeader, Select, useAction, useToast } from '../components/ui';
 import { date, money, titleCase, today } from '../lib/format';
 import { useApi, useCan } from '../lib/hooks';
 
@@ -11,13 +11,14 @@ export default function Recurring() {
   const { data, reload } = useApi<any[]>('/recurring');
   const [edit, setEdit] = useState<any>(null);
   const { run, busy } = useAction();
+  const toast = useToast();
   const can = useCan();
   const total = (t: any) => (t?.lines ?? []).reduce((a: number, l: any) => a + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
   return (
     <div>
       <PageHeader title="Recurring Invoices" subtitle="Invoice profiles generated automatically on schedule (checked hourly and on demand)"
         actions={can('sales', 'create') && <>
-          <button className="btn" disabled={busy} onClick={async () => { const r = await run(() => post('/recurring/run', {})); if (r) { reload(); alert(`${r.created.length} invoice(s) generated`); } }}>Run due profiles now</button>
+          <button className="btn" disabled={busy} onClick={async () => { const r = await run(() => post('/recurring/run', {})); if (r) { reload(); toast('success', `${r.created.length} invoice(s) generated`); } }}>Run due profiles now</button>
           <button className="btn btn-primary" onClick={() => setEdit({ frequency: 'monthly', every: 1, start_date: today(), status: 'active', template: { lines: [{ qty: 1 }] } })}><Plus className="h-4 w-4" />New Profile</button>
         </>} />
       <div className="p-5">

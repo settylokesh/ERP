@@ -150,7 +150,7 @@ function BudgetReport() {
           <tbody>{b.lines.map((l: any) => (
             <tr key={l.account_id}>
               <td>{l.account_name}</td>
-              {b.months.map((m: string, i: number) => <td key={m} className="num text-xs"><div>{qty(l.actual[i])}</div><div className="text-slate-400">{qty(l.budget[i])}</div></td>)}
+              {b.months.map((m: string, i: number) => <td key={m} className="num text-xs"><div>{qty(l.actual[i])}</div><div className="text-slate-500">{qty(l.budget[i])}</div></td>)}
               <td className="num">{money(l.total_budget)}</td><td className="num">{money(l.total_actual)}</td>
               <td className={`num font-medium ${(l.category === 'income' ? l.variance < 0 : l.variance > 0) ? 'text-red-600' : 'text-emerald-700'}`}>{money(l.variance)}{l.variance_pct != null && <div className="text-[10px]">{qty(l.variance_pct)}%</div>}</td>
             </tr>

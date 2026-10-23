@@ -1,14 +1,13 @@
-import { createHash, randomInt } from 'node:crypto';
 import { audit, queueEmail } from '../activity.js';
 import { assertCan, type AuthUser } from '../auth.js';
 import { db, fail, json, type Row } from '../db.js';
+import { cancelEwb, cancelIrn, recordEwb, recordIrn, updateEwbVehicle } from '../einvoice.js';
 import { applyCredits } from '../payments.js';
 import { org } from '../settings.js';
-import { addDays, fiscalYear, isDate, isRegistered, r2, today, validateGstin } from '../util.js';
+import { isDate, r2, today } from '../util.js';
 import {
   approveDocument, createDocument, createFrom, emailDocument, getDocument, refreshParent, rejectDocument, setStatus, submitDocument, voidDocument,
 } from './engine.js';
-import { loadFull } from './posting.js';
 import { docType } from './types.js';
 
 type Handler = (doc: Row, body: Row, user?: AuthUser) => unknown;
@@ -22,114 +21,6 @@ interface ActionDef {
 
 const st = (...s: string[]) => (doc: Row) => s.includes(doc.status);
 const data = (doc: Row) => json<Row>(doc.data, {});
-const updateData = (id: number, patch: Row) => {
-  const doc = db().get<Row>('SELECT data FROM documents WHERE id = ?', id)!;
-  db().update('documents', id, { data: JSON.stringify({ ...json<Row>(doc.data, {}), ...patch }) });
-};
-const fmtDate = (iso: string) => iso.slice(0, 10).split('-').reverse().join('/');
-
-// ---------- e-Invoicing (simulated IRP sandbox) ----------
-
-function generateIrn(doc: Row, user?: AuthUser) {
-  const o = org();
-  if (!o.einvoice_enabled) fail('Enable e-invoicing in Settings > Taxes & Compliance first', 422);
-  const gErr = validateGstin(o.gstin);
-  if (gErr) fail(`Organisation ${gErr}`, 422);
-  const contact = db().get<Row>('SELECT * FROM contacts WHERE id = ?', doc.contact_id)!;
-  if (!(isRegistered(contact.gst_treatment) || contact.gst_treatment === 'overseas')) {
-    fail('e-Invoices are only required for B2B, SEZ and export supplies. This customer is unregistered.', 422);
-  }
-  if (contact.gst_treatment !== 'overseas') {
-    const cErr = validateGstin(contact.gstin);
-    if (cErr) fail(`Customer ${cErr}`, 422);
-  }
-  const full = loadFull(doc.id)!;
-  const missingHsn = full.lines.find((l) => l.item_type === 'goods' && !(l.hsn_code && /^\d{4,8}$/.test(l.hsn_code)));
-  if (missingHsn) fail(`Line "${missingHsn.description}" needs a valid HSN code (4-8 digits)`, 422);
-  const d = data(doc);
-  if (d.einvoice?.status === 'generated') fail('IRN already generated', 422);
-  const fy = fiscalYear(doc.date, o.fiscal_year_start_month).label;
-  const docTyp = doc.type === 'credit_note' ? 'CRN' : 'INV';
-  const irn = createHash('sha256').update(`${o.gstin}${fy}${docTyp}${doc.number}`).digest('hex');
-  const ackNo = (BigInt('0x' + irn.slice(0, 15)) % 10n ** 15n).toString().padStart(15, '1');
-  const ackDate = new Date().toISOString();
-  const mainHsn = [...full.lines].sort((a, b) => b.taxable - a.taxable)[0]?.hsn_code ?? '';
-  const qr = Buffer.from(JSON.stringify({
-    SellerGstin: o.gstin, BuyerGstin: contact.gstin ?? 'URP', DocNo: doc.number, DocTyp: docTyp, DocDt: fmtDate(doc.date),
-    TotInvVal: doc.total, ItemCnt: full.lines.length, MainHsnCode: mainHsn, Irn: irn, IrnDt: ackDate.replace('T', ' ').slice(0, 19),
-  })).toString('base64url');
-  updateData(doc.id, { einvoice: { status: 'generated', irn, ack_no: ackNo, ack_date: ackDate, signed_qr: qr, sandbox: true } });
-  audit(doc.type, doc.id, 'einvoice', `IRN generated (Ack ${ackNo})`, user);
-}
-
-function cancelIrn(doc: Row, body: Row, user?: AuthUser) {
-  const e = data(doc).einvoice;
-  if (e?.status !== 'generated') fail('No active IRN to cancel', 422);
-  if (Date.now() - Date.parse(e.ack_date) > 24 * 3600 * 1000) fail('An IRN can only be cancelled within 24 hours of generation. Issue a credit note instead.', 422);
-  const reasons: Row = { 1: 'Duplicate', 2: 'Data entry mistake', 3: 'Order cancelled', 4: 'Others' };
-  const code = String(body.reason_code ?? '2');
-  if (!reasons[code]) fail('Invalid cancellation reason', 422);
-  updateData(doc.id, { einvoice: { ...e, status: 'cancelled', cancelled_at: new Date().toISOString(), cancel_reason: reasons[code], cancel_remarks: body.remarks ?? '' } });
-  audit(doc.type, doc.id, 'einvoice', `IRN cancelled: ${reasons[code]}`, user);
-}
-
-// ---------- e-Way bills (simulated NIC sandbox) ----------
-
-/** Validity per Rule 138(10): 1 day per 200 km (20 km for over-dimensional cargo), ending at midnight of the last day. */
-export function ewayValidity(generatedOn: string, distanceKm: number, odc = false) {
-  const days = Math.max(1, Math.ceil(distanceKm / (odc ? 20 : 200)));
-  return { days, valid_until: `${addDays(generatedOn.slice(0, 10), days)}T23:59:59` };
-}
-
-function generateEwb(doc: Row, body: Row, user?: AuthUser) {
-  const o = org();
-  const d = data(doc);
-  if (d.ewaybill?.status === 'generated') fail('An e-way bill is already active for this document', 422);
-  const full = loadFull(doc.id)!;
-  if (!full.lines.some((l) => l.item_type === 'goods')) fail('E-way bills are only needed for the movement of goods', 422);
-  if (doc.total < o.eway_threshold && !body.force) fail(`Consignment value ₹${doc.total} is below the e-way bill threshold of ₹${o.eway_threshold}. Pass force to generate anyway.`, 422);
-  const noHsn = full.lines.find((l) => l.item_type === 'goods' && !l.hsn_code);
-  if (noHsn) fail(`HSN code is required for "${noHsn.description}"`, 422);
-  const distance = Number(body.distance);
-  if (!(distance > 0 && distance <= 4000)) fail('Approximate distance must be between 1 and 4000 km', 422);
-  const mode = String(body.transport_mode ?? 'road');
-  if (!['road', 'rail', 'air', 'ship'].includes(mode)) fail('Invalid mode of transport', 422);
-  const vehicle = String(body.vehicle_no ?? '').toUpperCase().replace(/\s/g, '');
-  if (mode === 'road' && vehicle && !/^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{4}$/.test(vehicle)) fail('Vehicle number format is invalid (e.g. KA01AB1234)', 422);
-  if (mode === 'road' && !vehicle && !body.transporter_id) fail('Enter a vehicle number (Part-B) or a transporter ID', 422);
-  if (mode !== 'road' && !body.transport_doc_no) fail('Transport document number is required for rail, air or ship', 422);
-  const now = new Date().toISOString();
-  const { days, valid_until } = ewayValidity(now, distance, !!body.odc);
-  const ewbNo = String(randomInt(100000, 999999)) + String(randomInt(100000, 999999));
-  updateData(doc.id, {
-    ewaybill: {
-      status: 'generated', ewb_no: ewbNo, generated_at: now, valid_until: vehicle || mode !== 'road' ? valid_until : null, validity_days: days,
-      distance, transport_mode: mode, vehicle_no: vehicle || null, transporter_id: body.transporter_id ?? null,
-      transporter_name: body.transporter_name ?? null, transport_doc_no: body.transport_doc_no ?? null, odc: !!body.odc,
-      sub_type: doc.type === 'delivery_challan' ? (data(doc).challan_type ?? 'Job Work') : 'Supply', sandbox: true,
-    },
-  });
-  audit(doc.type, doc.id, 'ewaybill', `E-way bill ${ewbNo} generated, valid ${days} day(s)`, user);
-}
-
-function updateEwbVehicle(doc: Row, body: Row, user?: AuthUser) {
-  const e = data(doc).ewaybill;
-  if (e?.status !== 'generated') fail('No active e-way bill', 422);
-  if (e.valid_until && Date.now() > Date.parse(e.valid_until)) fail('The e-way bill has expired', 422);
-  const vehicle = String(body.vehicle_no ?? '').toUpperCase().replace(/\s/g, '');
-  if (!/^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{4}$/.test(vehicle)) fail('Vehicle number format is invalid (e.g. KA01AB1234)', 422);
-  const validity = e.valid_until ? { valid_until: e.valid_until } : ewayValidity(new Date().toISOString(), e.distance, e.odc);
-  updateData(doc.id, { ewaybill: { ...e, vehicle_no: vehicle, valid_until: validity.valid_until, vehicle_history: [...(e.vehicle_history ?? []), { vehicle_no: vehicle, at: new Date().toISOString(), reason: body.reason ?? 'Transhipment' }] } });
-  audit(doc.type, doc.id, 'ewaybill', `E-way bill Part-B updated with vehicle ${vehicle}`, user);
-}
-
-function cancelEwb(doc: Row, body: Row, user?: AuthUser) {
-  const e = data(doc).ewaybill;
-  if (e?.status !== 'generated') fail('No active e-way bill', 422);
-  if (Date.now() - Date.parse(e.generated_at) > 24 * 3600 * 1000) fail('E-way bills can only be cancelled within 24 hours of generation', 422);
-  updateData(doc.id, { ewaybill: { ...e, status: 'cancelled', cancelled_at: new Date().toISOString(), cancel_reason: body.reason ?? 'Data entry mistake' } });
-  audit(doc.type, doc.id, 'ewaybill', `E-way bill ${e.ewb_no} cancelled`, user);
-}
 
 // ---------- RFQ bidding ----------
 
@@ -282,11 +173,19 @@ export const ACTIONS: Record<string, ActionDef> = {
       setStatus(doc.id, 'transferred', u, { transferred_date: date }, 'transferred');
     },
   },
-  einvoice_generate: { label: 'Push to IRP (e-Invoice)', types: ['invoice', 'credit_note'], when: (doc) => ['open', 'partially_paid', 'paid', 'closed'].includes(doc.status) && data(doc).einvoice?.status !== 'generated', perm: 'edit', run: (doc, _b, u) => generateIrn(doc, u) },
-  einvoice_cancel: { label: 'Cancel IRN', types: ['invoice', 'credit_note'], when: (doc) => data(doc).einvoice?.status === 'generated', perm: 'edit', run: (doc, b, u) => cancelIrn(doc, b, u) },
-  eway_generate: { label: 'Generate e-Way Bill', types: ['invoice', 'delivery_challan', 'credit_note'], when: (doc) => !['draft', 'void', 'returned', 'pending_approval'].includes(doc.status) && data(doc).ewaybill?.status !== 'generated', perm: 'edit', run: (doc, b, u) => generateEwb(doc, b, u) },
+  einvoice_record: {
+    label: 'Record IRN', types: ['invoice', 'credit_note'],
+    when: (doc) => ['open', 'partially_paid', 'paid', 'closed'].includes(doc.status) && data(doc).einvoice?.status !== 'generated', perm: 'edit',
+    run: (doc, b, u) => recordIrn(doc, b, u),
+  },
+  einvoice_cancel: { label: 'Mark IRN Cancelled', types: ['invoice', 'credit_note'], when: (doc) => data(doc).einvoice?.status === 'generated', perm: 'edit', run: (doc, b, u) => cancelIrn(doc, b, u) },
+  eway_record: {
+    label: 'Record e-Way Bill', types: ['invoice', 'delivery_challan', 'credit_note'],
+    when: (doc) => !['draft', 'void', 'returned', 'pending_approval', 'rejected'].includes(doc.status) && data(doc).ewaybill?.status !== 'generated', perm: 'edit',
+    run: (doc, b, u) => recordEwb(doc, b, u),
+  },
   eway_update_vehicle: { label: 'Update Vehicle (Part-B)', types: ['invoice', 'delivery_challan', 'credit_note'], when: (doc) => data(doc).ewaybill?.status === 'generated', perm: 'edit', run: (doc, b, u) => updateEwbVehicle(doc, b, u) },
-  eway_cancel: { label: 'Cancel e-Way Bill', types: ['invoice', 'delivery_challan', 'credit_note'], when: (doc) => data(doc).ewaybill?.status === 'generated', perm: 'edit', run: (doc, b, u) => cancelEwb(doc, b, u) },
+  eway_cancel: { label: 'Mark e-Way Bill Cancelled', types: ['invoice', 'delivery_challan', 'credit_note'], when: (doc) => data(doc).ewaybill?.status === 'generated', perm: 'edit', run: (doc, b, u) => cancelEwb(doc, b, u) },
   apply_credits: {
     label: 'Apply to Invoices', types: ['credit_note', 'vendor_credit', 'retainer_invoice'],
     when: (doc) => (doc.type === 'retainer_invoice' ? ['paid', 'open'].includes(doc.status) : doc.status === 'open'), perm: 'edit',

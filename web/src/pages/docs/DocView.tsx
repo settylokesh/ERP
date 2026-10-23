@@ -1,7 +1,7 @@
 import { ArrowLeft, ChevronDown, Copy, CreditCard, Pencil, Printer, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { del, post } from '../../api';
+import { del, download, post } from '../../api';
 import { AccountPicker } from '../../components/pickers';
 import { Badge, Check, Confirm, ErrorBox, Field, Input, KeyVal, Modal, PageHeader, Select, Spinner, Tabs, Textarea, useAction } from '../../components/ui';
 import { date, dateTime, money, qty, titleCase, today } from '../../lib/format';
@@ -18,25 +18,52 @@ const ACTION_FORMS: Record<string, F[]> = {
   approve: [{ key: 'comment', label: 'Comment (optional)', type: 'textarea' }],
   reject: [{ key: 'comment', label: 'Reason for rejection', type: 'textarea' }],
   email: [{ key: 'to', label: 'To (leave blank for the contact email)' }],
+  einvoice_record: [
+    { key: 'irn', label: 'IRN', hint: 'The 64-character Invoice Reference Number returned by the IRP' },
+    { key: 'ack_no', label: 'Acknowledgement number' },
+    { key: 'ack_date', label: 'Acknowledgement date and time', type: 'datetime-local' },
+    { key: 'signed_qr', label: 'Signed QR code (optional)', type: 'textarea', hint: 'Paste the SignedQRCode value to print the e-invoice QR code on the invoice' },
+  ],
   einvoice_cancel: [{ key: 'reason_code', label: 'Reason', type: 'select', def: '2', options: [{ value: '1', label: 'Duplicate' }, { value: '2', label: 'Data entry mistake' }, { value: '3', label: 'Order cancelled' }, { value: '4', label: 'Others' }] }, { key: 'remarks', label: 'Remarks' }],
-  eway_generate: [
+  eway_record: [
+    { key: 'ewb_no', label: 'e-Way bill number', hint: '12 digits, from the e-way bill portal' },
+    { key: 'ewb_date', label: 'Generated on', type: 'datetime-local' },
+    ...TRANSPORT_FIELDS(),
+  ],
+  eway_update_vehicle: [
+    { key: 'vehicle_no', label: 'New vehicle number' },
+    { key: 'reason_code', label: 'Reason', type: 'select', def: '2', options: [{ value: '1', label: 'Due to break down' }, { value: '2', label: 'Due to transhipment' }, { value: '4', label: 'First time' }, { value: '3', label: 'Others' }] },
+    { key: 'remarks', label: 'Remarks' },
+  ],
+  eway_cancel: [{ key: 'reason_code', label: 'Reason', type: 'select', def: '3', options: [{ value: '1', label: 'Duplicate' }, { value: '2', label: 'Order cancelled' }, { value: '3', label: 'Data entry mistake' }, { value: '4', label: 'Others' }] }, { key: 'remarks', label: 'Remarks' }],
+};
+function TRANSPORT_FIELDS(): F[] {
+  return [
     { key: 'distance', label: 'Approximate distance (km)', type: 'number' },
     { key: 'transport_mode', label: 'Mode', type: 'select', def: 'road', options: [{ value: 'road', label: 'Road' }, { value: 'rail', label: 'Rail' }, { value: 'air', label: 'Air' }, { value: 'ship', label: 'Ship' }] },
-    { key: 'vehicle_no', label: 'Vehicle number (Part-B)', hint: 'e.g. KA01AB1234' }, { key: 'transporter_id', label: 'Transporter ID (GSTIN/TRANSIN)' },
-    { key: 'transporter_name', label: 'Transporter name' }, { key: 'transport_doc_no', label: 'Transport doc # (rail/air/ship)' },
-    { key: 'odc', label: 'Over-dimensional cargo', type: 'check' }, { key: 'force', label: 'Generate even if below the threshold', type: 'check' },
-  ],
-  eway_update_vehicle: [{ key: 'vehicle_no', label: 'New vehicle number' }, { key: 'reason', label: 'Reason', type: 'select', def: 'Transhipment', options: ['Breakdown', 'Transhipment', 'Others'].map((x) => ({ value: x, label: x })) }],
-  eway_cancel: [{ key: 'reason', label: 'Reason', type: 'select', def: 'Data entry mistake', options: ['Duplicate', 'Order cancelled', 'Data entry mistake', 'Others'].map((x) => ({ value: x, label: x })) }],
+    { key: 'vehicle_no', label: 'Vehicle number (Part-B)', hint: 'e.g. KA01AB1234' },
+    { key: 'vehicle_type', label: 'Vehicle type', type: 'select', def: 'regular', options: [{ value: 'regular', label: 'Regular' }, { value: 'odc', label: 'Over-dimensional cargo' }] },
+    { key: 'transporter_id', label: 'Transporter ID (GSTIN/TRANSIN)' }, { key: 'transporter_name', label: 'Transporter name' },
+    { key: 'transport_doc_no', label: 'Transport document number', hint: 'Required for rail, air or ship' }, { key: 'transport_doc_date', label: 'Transport document date', type: 'date' },
+  ];
+}
+const CONFIRM_ONLY = new Set(['submit', 'mark_accepted', 'mark_declined', 'close', 'reopen', 'cancel', 'unship', 'mark_delivered', 'mark_returned', 'publish', 'close_bidding', 'create_pos', 'start_count']);
+const ACTION_NOTES: Record<string, string> = {
+  einvoice_record: 'Generate the IRN on the e-invoice portal (IRP) with the JSON file from More → Download e-invoice JSON, then record what the portal returned.',
+  einvoice_cancel: 'Cancel the IRN on the IRP first (allowed within 24 hours of generation), then mark it cancelled here.',
+  eway_record: 'Generate the e-way bill on the e-way bill portal (for example with More → Download e-way bill JSON), then record its number here.',
+  eway_cancel: 'Cancel the e-way bill on the portal first (allowed within 24 hours), then mark it cancelled here.',
+  eway_update_vehicle: 'Update Part-B on the e-way bill portal, then record the new vehicle here.',
 };
-const CONFIRM_ONLY = new Set(['submit', 'mark_accepted', 'mark_declined', 'close', 'reopen', 'cancel', 'unship', 'mark_delivered', 'mark_returned', 'einvoice_generate', 'publish', 'close_bidding', 'create_pos', 'start_count']);
 
 function ActionModal({ action, label, doc, onDone, onClose }: { action: string; label: string; doc: any; onDone: (r: any) => void; onClose: () => void }) {
   const fields = ACTION_FORMS[action] ?? [];
   const [body, setBody] = useState<any>(Object.fromEntries(fields.filter((f) => f.def !== undefined).map((f) => [f.key, f.def])));
   const { run, busy } = useAction();
   const go = async () => {
-    const r = await run(() => post(`/docs/${doc.type}/${doc.id}/actions/${action}`, body), `${label} done`);
+    // datetime-local values are local time without a zone; send them as ISO instants.
+    const payload = Object.fromEntries(Object.entries(body).map(([k, v]) => [k, fields.find((f) => f.key === k)?.type === 'datetime-local' && v ? new Date(String(v)).toISOString() : v]));
+    const r = await run(() => post(`/docs/${doc.type}/${doc.id}/actions/${action}`, payload), `${label} done`);
     if (r) onDone(r);
   };
   if (CONFIRM_ONLY.has(action)) {
@@ -45,6 +72,7 @@ function ActionModal({ action, label, doc, onDone, onClose }: { action: string; 
   return (
     <Modal title={`${label} — ${doc.number}`} onClose={onClose} footer={<><button className="btn" onClick={onClose}>Cancel</button><button className={`btn ${action === 'void' || action === 'reject' ? 'btn-danger' : 'btn-primary'}`} disabled={busy} onClick={go}>{label}</button></>}>
       <div className="space-y-3">
+        {ACTION_NOTES[action] && <p className="rounded-md bg-slate-50 p-2 text-xs text-slate-600">{ACTION_NOTES[action]}</p>}
         {fields.map((f) => (
           <Field key={f.key} label={f.type === 'check' ? '' : f.label} hint={f.hint}>
             {f.type === 'textarea' ? <Textarea value={body[f.key] ?? ''} onChange={(e) => setBody({ ...body, [f.key]: e.target.value })} />
@@ -158,6 +186,27 @@ function BidsTab({ doc, reload }: { doc: any; reload: () => void }) {
   );
 }
 
+/** Collects transport details and downloads the e-way bill bulk-generation JSON for this document. */
+function EwayJson({ doc, onClose }: { doc: any; onClose: () => void }) {
+  const fields = TRANSPORT_FIELDS();
+  const [body, setBody] = useState<any>(Object.fromEntries(fields.filter((f) => f.def !== undefined).map((f) => [f.key, f.def])));
+  const { run, busy } = useAction();
+  return (
+    <Modal title={`e-Way bill JSON — ${doc.number}`} onClose={onClose} footer={<><button className="btn" onClick={onClose}>Cancel</button>
+      <button className="btn btn-primary" disabled={busy} onClick={async () => { if (await run(() => download(`/docs/${doc.type}/${doc.id}/ewaybill.json`, `ewaybill_${doc.number}.json`, body), 'File downloaded')) onClose(); }}>Download JSON</button></>}>
+      <p className="mb-3 rounded-md bg-slate-50 p-2 text-xs text-slate-600">Upload the file under Generate → Bulk on the e-way bill portal, then use More → Record e-Way Bill to save the number it returns.</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {fields.map((f) => (
+          <Field key={f.key} label={f.label} hint={f.hint}>
+            {f.type === 'select' ? <Select value={body[f.key] ?? ''} options={f.options!} onChange={(e) => setBody({ ...body, [f.key]: e.target.value })} />
+              : <Input type={f.type ?? 'text'} value={body[f.key] ?? ''} onChange={(e) => setBody({ ...body, [f.key]: f.type === 'number' ? Number(e.target.value) : e.target.value })} />}
+          </Field>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 function CompleteCount({ doc, onDone, onClose }: { doc: any; onDone: () => void; onClose: () => void }) {
   const [counts, setCounts] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l: any) => [l.id, l.qty2 ?? ''])));
   const { run, busy } = useAction();
@@ -219,6 +268,8 @@ export default function DocView() {
     if (['apply_credits', 'record_bid', 'complete_count'].includes(a.key)) setSpecial(a.key);
     else setAction(a);
   };
+  const issued = !['draft', 'void', 'pending_approval', 'rejected', 'returned'].includes(doc.status);
+  const einvoiceParty = ['business_gst', 'business_composition', 'sez', 'deemed_export', 'overseas'].includes(doc.contact?.gst_treatment);
   const canConvert = (t: any) => {
     if (['draft', 'void', 'pending_approval', 'rejected', 'cancelled'].includes(doc.status)) return false;
     if (t.type === 'sales_return' && type === 'sales_order' && doc.fulfil_status === 'pending') return false;
@@ -246,6 +297,8 @@ export default function DocView() {
           <Dropdown label="More">
             {secondary.map((a) => <MenuItem key={a.key} onClick={() => openAction(a)} danger={a.key === 'void' || a.key === 'reject'}>{a.label}</MenuItem>)}
             {['credit_note', 'vendor_credit'].includes(type) && doc.status === 'open' && <MenuItem onClick={() => setSpecial('refund')}>Refund</MenuItem>}
+            {['invoice', 'credit_note'].includes(type) && issued && einvoiceParty && <MenuItem onClick={() => run(() => download(`/docs/${type}/${id}/einvoice.json`, `einvoice_${doc.number}.json`), 'e-Invoice JSON downloaded')}>Download e-invoice JSON</MenuItem>}
+            {['invoice', 'delivery_challan', 'credit_note'].includes(type) && issued && <MenuItem onClick={() => setSpecial('eway_json')}>Download e-way bill JSON</MenuItem>}
             {can(def.module, 'create') && !['package', 'purchase_receive', 'sales_return'].includes(type) && <MenuItem onClick={() => nav(`/docs/${type}/new?clone=${doc.id}`)}><span className="inline-flex items-center gap-1"><Copy className="h-3.5 w-3.5" />Clone</span></MenuItem>}
             {can(def.module, 'delete') && <MenuItem danger onClick={() => setConfirmDelete(true)}><span className="inline-flex items-center gap-1"><Trash2 className="h-3.5 w-3.5" />Delete</span></MenuItem>}
           </Dropdown>
@@ -268,7 +321,7 @@ export default function DocView() {
           <>
             {(doc.data?.einvoice || doc.data?.ewaybill || doc.data?.shipment) && (
               <div className="no-print grid gap-3 md:grid-cols-3">
-                {doc.data?.einvoice && <div className="card p-3"><h3 className="mb-2">e-Invoice <Badge status={doc.data.einvoice.status} /></h3><KeyVal items={[['IRN', <span className="break-all text-[11px]">{doc.data.einvoice.irn}</span>], ['Ack No', doc.data.einvoice.ack_no], ['Ack Date', dateTime(doc.data.einvoice.ack_date)], ['Cancelled', doc.data.einvoice.cancel_reason]]} /></div>}
+                {doc.data?.einvoice && <div className="card p-3"><h3 className="mb-2">e-Invoice <Badge status={doc.data.einvoice.status} /></h3><KeyVal items={[['IRN', <span className="break-all text-[11px]">{doc.data.einvoice.irn}</span>], ['Ack No', doc.data.einvoice.ack_no], ['Ack Date', dateTime(doc.data.einvoice.ack_date)], ['Signed QR', doc.data.einvoice.signed_qr ? 'Recorded' : 'Not recorded'], ['Cancelled', doc.data.einvoice.cancel_reason]]} /></div>}
                 {doc.data?.ewaybill && <div className="card p-3"><h3 className="mb-2">e-Way Bill <Badge status={doc.data.ewaybill.status} /></h3><KeyVal items={[['EWB No', doc.data.ewaybill.ewb_no], ['Valid until', doc.data.ewaybill.valid_until ? dateTime(doc.data.ewaybill.valid_until) : 'Part-B pending'], ['Distance', `${doc.data.ewaybill.distance} km`], ['Vehicle', doc.data.ewaybill.vehicle_no], ['Mode', titleCase(doc.data.ewaybill.transport_mode)]]} /></div>}
                 {doc.data?.shipment && <div className="card p-3"><h3 className="mb-2">Shipment</h3><KeyVal items={[['Shipped on', date(doc.data.shipment.date)], ['Carrier', doc.data.shipment.carrier], ['Tracking #', doc.data.shipment.tracking_no], ['Delivered on', date(doc.data.delivered_on)]]} /></div>}
               </div>
@@ -343,6 +396,7 @@ export default function DocView() {
       {special === 'refund' && <RefundModal doc={doc} onDone={after} onClose={() => setSpecial(null)} />}
       {special === 'record_bid' && <RecordBid doc={doc} onDone={after} onClose={() => setSpecial(null)} />}
       {special === 'complete_count' && <CompleteCount doc={doc} onDone={after} onClose={() => setSpecial(null)} />}
+      {special === 'eway_json' && <EwayJson doc={doc} onClose={() => setSpecial(null)} />}
       {confirmDelete && <Confirm danger title={`Delete ${def.label}`} message={`Delete ${doc.number}? Its stock movements and journal entries are removed. This cannot be undone.`} confirmLabel="Delete"
         onClose={() => setConfirmDelete(false)} onConfirm={async () => { setConfirmDelete(false); if (await run(() => del(`/docs/${type}/${id}`), 'Deleted')) nav(`/docs/${type}`); }} />}
     </div>

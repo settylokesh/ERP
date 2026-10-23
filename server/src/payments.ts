@@ -2,7 +2,7 @@ import { audit, runWorkflows } from './activity.js';
 import type { AuthUser } from './auth.js';
 import { db, fail, type Row } from './db.js';
 import { creditUsed, refreshBalance } from './documents/engine.js';
-import { acct, journalsFor, replaceJournal, type JLine } from './ledger.js';
+import { acct, assertNotReconciled, journalsFor, replaceJournal, type JLine } from './ledger.js';
 import { assertUnlocked, nextNumber } from './settings.js';
 import { isDate, r2, today } from './util.js';
 
@@ -53,7 +53,14 @@ function validate(input: PaymentInput, existingId?: number) {
   if (!['cash', 'bank', 'credit_card', 'other_current_asset'].includes(account.type)) fail('Choose a cash, bank or card account', 422);
   const mode = input.mode ?? 'bank_transfer';
   if (!MODES.includes(mode)) fail('Invalid payment mode', 422);
+  // Payments settle documents in their own currency; without an explicit currency, follow the first allocated document.
+  const firstDoc = (input.allocations ?? []).find((a) => Number(a.amount) > 0);
+  const docCurrency = firstDoc ? d.value<string>('SELECT currency_code FROM documents WHERE id = ?', Number(firstDoc.document_id)) : null;
+  const currency_code = String(input.currency_code || docCurrency || contact.currency_code || 'INR').toUpperCase();
+  if (currency_code !== 'INR' && !d.get('SELECT 1 FROM currencies WHERE code = ?', currency_code)) fail(`Currency ${currency_code} is not set up`, 422);
+  const exchange_rate = currency_code === 'INR' ? 1 : Number(input.exchange_rate ?? d.value<number>('SELECT rate FROM currencies WHERE code = ?', currency_code) ?? 1);
   const allocations = (input.allocations ?? []).filter((a) => Number(a.amount) > 0).map((a) => ({ document_id: Number(a.document_id), amount: r2(Number(a.amount)) }));
+  const storedCurrency = existingId ? d.value<string>('SELECT currency_code FROM payments WHERE id = ?', existingId) : null;
   const seen = new Set<number>();
   let allocated = 0;
   for (const a of allocations) {
@@ -62,14 +69,16 @@ function validate(input: PaymentInput, existingId?: number) {
     const doc = d.get<Row>('SELECT * FROM documents WHERE id = ?', a.document_id) ?? fail('Document not found', 422);
     if (!PAYABLE_DOCS[input.kind].includes(doc.type)) fail(`${doc.number} cannot be paid with this payment`, 422);
     if (doc.contact_id !== contact.id) fail(`${doc.number} belongs to another contact`, 422);
-    if (!['open', 'partially_paid', 'paid'].includes(doc.status)) fail(`${doc.number} is not open for payment`, 422);
     const mine = existingId ? d.value<number>('SELECT COALESCE(SUM(amount),0) FROM payment_allocations WHERE payment_id = ? AND document_id = ?', existingId, a.document_id) ?? 0 : 0;
+    // Allocations saved before this rule existed stay editable as long as the payment keeps its currency.
+    const grandfathered = mine > 0 && storedCurrency === currency_code;
+    if ((doc.currency_code || 'INR') !== currency_code && !grandfathered) fail(`${doc.number} is in ${doc.currency_code}; record the payment in the same currency`, 422);
+    if (!['open', 'partially_paid', 'paid'].includes(doc.status)) fail(`${doc.number} is not open for payment`, 422);
     if (a.amount > r2(doc.balance + mine) + 0.001) fail(`Payment of ${a.amount} exceeds the balance ${r2(doc.balance + mine)} of ${doc.number}`, 422);
     allocated += a.amount;
   }
   if (r2(allocated) > r2(amount + tds_amount) + 0.001) fail('Allocated amount exceeds the payment amount', 422);
-  const currency_code = input.currency_code ?? contact.currency_code ?? 'INR';
-  const exchange_rate = currency_code === 'INR' ? 1 : Number(input.exchange_rate ?? d.value<number>('SELECT rate FROM currencies WHERE code = ?', currency_code) ?? 1);
+  if (!(exchange_rate > 0)) fail('Exchange rate must be positive', 422);
   return {
     row: { kind: input.kind, date, contact_id: contact.id, amount, bank_charges, tds_amount, mode, account_id: account.id, reference: input.reference ?? null, notes: input.notes ?? null, currency_code, exchange_rate },
     allocations,
@@ -129,9 +138,7 @@ export function updatePayment(id: number, input: PaymentInput, user?: AuthUser) 
   return db().tx(() => {
     const existing = db().get<Row>('SELECT * FROM payments WHERE id = ?', id) ?? fail('Payment not found', 404);
     if (existing.status === 'void') fail('Void payments cannot be edited', 422);
-    if (db().get('SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL', 'payment', id)) {
-      fail('This payment is reconciled. Undo the reconciliation before editing.', 422);
-    }
+    assertNotReconciled('payment', id, 'edit');
     assertUnlocked(lockOf(existing.kind), existing.date, 'payment');
     const { row, allocations } = validate({ ...input, kind: existing.kind }, id);
     assertUnlocked(lockOf(existing.kind), row.date, 'payment');
@@ -152,14 +159,11 @@ export function deletePayment(id: number, user?: AuthUser) {
   db().tx(() => {
     const p = db().get<Row>('SELECT * FROM payments WHERE id = ?', id) ?? fail('Payment not found', 404);
     assertUnlocked(lockOf(p.kind), p.date, 'payment');
-    if (db().get('SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL', 'payment', id)) {
-      fail('This payment is reconciled. Undo the reconciliation before deleting.', 422);
-    }
+    assertNotReconciled('payment', id, 'delete');
     const docs = db().all<{ document_id: number }>('SELECT document_id FROM payment_allocations WHERE payment_id = ? UNION SELECT document_id FROM credit_applications WHERE payment_id = ?', id, id);
     for (const r of db().all<{ id: number }>('SELECT id FROM refunds WHERE payment_id = ?', id)) replaceJournal('refund', r.id, null);
     db().run('DELETE FROM refunds WHERE payment_id = ?', id);
     replaceJournal('payment', id, null);
-    db().run("UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL WHERE matched_source_type = 'payment' AND matched_source_id = ?", id);
     db().run('DELETE FROM payments WHERE id = ?', id);
     for (const d of docs) refreshBalance(d.document_id);
     audit('payment', id, 'deleted', `Payment ${p.number} deleted`, user);
@@ -187,10 +191,13 @@ export function listPayments(kind: string, q: Row) {
   if (q.from) { where.push('p.date >= ?'); params.push(q.from); }
   if (q.to) { where.push('p.date <= ?'); params.push(q.to); }
   if (q.search) { where.push('(p.number LIKE ? OR p.reference LIKE ? OR c.name LIKE ?)'); params.push(`%${q.search}%`, `%${q.search}%`, `%${q.search}%`); }
+  const limit = Math.min(Number(q.limit) || 200, 1000);
+  const offset = Math.max(0, Number(q.offset) || 0);
   const rows = db().all<Row>(
     `SELECT p.*, c.name AS contact_name, a.name AS account_name FROM payments p JOIN contacts c ON c.id = p.contact_id JOIN accounts a ON a.id = p.account_id
-     WHERE ${where.join(' AND ')} ORDER BY p.date DESC, p.id DESC LIMIT 500`, ...params);
-  return { rows: rows.map((r) => ({ ...r, unused: paymentUnused(r.id) })), total: rows.length };
+     WHERE ${where.join(' AND ')} ORDER BY p.date DESC, p.id DESC LIMIT ? OFFSET ?`, ...params, limit, offset);
+  const total = db().value<number>(`SELECT COUNT(*) FROM payments p JOIN contacts c ON c.id = p.contact_id WHERE ${where.join(' AND ')}`, ...params) ?? 0;
+  return { rows: rows.map((r) => ({ ...r, unused: paymentUnused(r.id) })), total };
 }
 
 /** Applies credit notes, vendor credits, retainer advances or excess payments against open invoices/bills. */

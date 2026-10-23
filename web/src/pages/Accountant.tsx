@@ -26,7 +26,7 @@ function Accounts() {
         {loading && !data ? <Spinner /> : (
           <DataTable exportName="chart_of_accounts" rows={rows} onRow={(r) => nav(`/accountant/accounts/${r.id}`)} cols={[
             { key: 'code', label: 'Code' },
-            { key: 'name', label: 'Account Name', render: (r) => <span className="link">{r.name}{r.system_key && <span className="ml-1 text-[10px] text-slate-400">SYSTEM</span>}{!r.is_active && <span className="ml-1 text-xs text-slate-400">(inactive)</span>}</span> },
+            { key: 'name', label: 'Account Name', render: (r) => <span className="link">{r.name}{r.system_key && <span className="ml-1 text-[10px] text-slate-500">SYSTEM</span>}{!r.is_active && <span className="ml-1 text-xs text-slate-500">(inactive)</span>}</span> },
             { key: 'type', label: 'Account Type', render: (r) => meta.account_types[r.type]?.label },
             { key: 'balance', label: 'Balance', num: true, render: (r) => money(r.balance) },
             { key: 'edit', label: '', render: (r) => can('accountant', 'edit') && <button className="text-xs text-brand-600" onClick={(e) => { e.stopPropagation(); setEdit(r); }}>Edit</button> },
@@ -146,7 +146,7 @@ function JournalForm() {
             <tbody>{f.lines.map((l: any, i: number) => (
               <tr key={i}>
                 <td><AccountPicker value={l.account_id} onChange={(v) => upd(i, { account_id: v })} /></td>
-                <td><Input value={l.description ?? ''} onChange={(e) => upd(i, { description: e.target.value })} /></td>
+                <td><Input aria-label={`Line ${i + 1} description`} value={l.description ?? ''} onChange={(e) => upd(i, { description: e.target.value })} /></td>
                 <td><Combo options={contacts} value={l.contact_id} onChange={(v) => upd(i, { contact_id: v })} placeholder="Contact (for AR/AP)" /></td>
                 <td><Input type="number" className="text-right" value={l.debit ?? ''} onChange={(e) => upd(i, { debit: e.target.value, credit: '' })} aria-label="Debit" /></td>
                 <td><Input type="number" className="text-right" value={l.credit ?? ''} onChange={(e) => upd(i, { credit: e.target.value, debit: '' })} aria-label="Credit" /></td>

@@ -1,42 +1,49 @@
-import { saveAsset, registerAsset, runDepreciation, saveBudget, saveManualJournal } from './accountant.js';
-import { loadUser } from './auth.js';
-import { saveBankTransaction, importStatement } from './banking.js';
-import { saveWorkflow } from './custom.js';
-import { db, type Row } from './db.js';
-import { runAction } from './documents/actions.js';
-import { createDocument, createFrom } from './documents/engine.js';
-import { acct } from './ledger.js';
-import { completeMo, confirmMo, jobCardAction, recordInspection, createInspection, saveBom, saveMo, saveQualityRule, saveWorkCenter } from './manufacturing.js';
-import { saveAccount, saveContact, saveItem, saveWarehouse } from './masters.js';
-import { createPayment } from './payments.js';
-import { approvePayRun, createPayRun, recordPayRunPayment, saveEmployee, updatePayslip } from './payroll.js';
-import { DEMO_ORG, demoRows } from './seed.js';
-import { getKv, setKv, DEFAULT_ORG } from './settings.js';
-import { hashPassword } from './auth.js';
-import { addDays, today } from './util.js';
+import { saveAsset, registerAsset, runDepreciation, saveBudget, saveManualJournal } from '../../src/accountant.js';
+import { hashPassword, loadUser } from '../../src/auth.js';
+import { saveBankTransaction, importStatement } from '../../src/banking.js';
+import { saveWorkflow } from '../../src/custom.js';
+import { db, type Row } from '../../src/db.js';
+import { runAction } from '../../src/documents/actions.js';
+import { createDocument, createFrom } from '../../src/documents/engine.js';
+import { acct } from '../../src/ledger.js';
+import { completeMo, confirmMo, jobCardAction, recordInspection, createInspection, saveBom, saveMo, saveQualityRule, saveWorkCenter } from '../../src/manufacturing.js';
+import { saveAccount, saveContact, saveItem, saveWarehouse } from '../../src/masters.js';
+import { createPayment } from '../../src/payments.js';
+import { approvePayRun, createPayRun, recordPayRunPayment, saveEmployee, updatePayslip } from '../../src/payroll.js';
+import { getKv, setKv, DEFAULT_ORG } from '../../src/settings.js';
+import { addDays, makeGstin, today } from '../../src/util.js';
+
+/** Password of the sample company's non-admin users (test environments only). */
+export const SAMPLE_USER_PASSWORD = 'sample-pass-123';
 
 /**
- * Loads a realistic demo company (a pump manufacturer in Bengaluru) by running real business flows through the
- * same services the API uses, so every journal, stock move and status in the demo is produced by the engine itself.
+ * TEST FIXTURE - never loaded by the application.
+ *
+ * Builds a realistic sample company (a pump manufacturer in Bengaluru) for end-to-end tests by running real business
+ * flows through the same services the API uses, so every journal, stock move and status is produced by the engine.
+ * Requires an initialised database with a first administrator.
  */
-export function seedDemo() {
+export function loadSampleCompany() {
   const d = db();
   if (d.get('SELECT 1 FROM contacts')) return false;
   const admin = loadUser(d.value<number>('SELECT id FROM users ORDER BY id LIMIT 1'))!;
   d.tx(() => {
-    setKv('org', { ...DEFAULT_ORG, ...getKv('org', DEFAULT_ORG), ...DEMO_ORG });
+    setKv('org', { ...DEFAULT_ORG, ...getKv('org', DEFAULT_ORG), ...SAMPLE_ORG });
     const wh1 = d.value<number>('SELECT id FROM warehouses WHERE is_primary = 1');
-    d.update('warehouses', wh1, { name: 'Peenya Main Warehouse', code: 'BLR-01', address: 'Plot 42, Peenya Industrial Area, Bengaluru', state_code: '29' });
+    d.update('warehouses', wh1, { name: 'Peenya Main Warehouse', code: 'BLR-01', address: 'Plot 42, Peenya Industrial Area', city: 'Bengaluru', pincode: '560058', state_code: '29' });
     const wh2 = saveWarehouse({ name: 'Hosur Road Finished Goods', code: 'BLR-02', state_code: '29', address: 'Bommasandra, Bengaluru' });
     const hdfc = saveAccount({ code: '1020', name: 'HDFC Bank Current A/c', type: 'bank', bank_name: 'HDFC Bank', account_number: '50200012345678', ifsc: 'HDFC0000523' });
     const icici = saveAccount({ code: '1021', name: 'ICICI Bank OD A/c', type: 'bank', bank_name: 'ICICI Bank', account_number: '000405012345', ifsc: 'ICIC0000004' });
     const card = saveAccount({ code: '2600', name: 'Corporate Credit Card', type: 'credit_card' });
 
-    for (const [email, name, role] of [['sales@saral.local', 'Priya Sharma', 'Sales Executive'], ['accounts@saral.local', 'Arjun Rao', 'Accountant'], ['stores@saral.local', 'Imran Khan', 'Warehouse Manager'], ['production@saral.local', 'Lakshmi Narayan', 'Production Manager'], ['hr@saral.local', 'Neha Gupta', 'HR Manager'], ['purchase@saral.local', 'Vikram Singh', 'Purchase Officer']]) {
-      d.insert('users', { name, email, password_hash: hashPassword('demo1234'), role_id: d.value('SELECT id FROM roles WHERE name = ?', role) });
+    for (const [email, name, role] of [['sales@example.com', 'Priya Sharma', 'Sales Executive'], ['accounts@example.com', 'Arjun Rao', 'Accountant'], ['stores@example.com', 'Imran Khan', 'Warehouse Manager'], ['production@example.com', 'Lakshmi Narayan', 'Production Manager'], ['hr@example.com', 'Neha Gupta', 'HR Manager'], ['purchase@example.com', 'Vikram Singh', 'Purchase Officer']]) {
+      d.insert('users', { name, email, password_hash: hashPassword(SAMPLE_USER_PASSWORD), role_id: d.value('SELECT id FROM roles WHERE name = ?', role) });
     }
+    for (const n of ['Production', 'Sales', 'Accounts', 'Stores']) d.insert('departments', { name: n });
+    for (const n of ['Machine Operator', 'Production Supervisor', 'Sales Executive', 'Accountant', 'Store Keeper']) d.insert('designations', { name: n });
+    d.insert('currencies', { code: 'USD', name: 'US Dollar', symbol: '$', rate: 88, is_base: 0 });
 
-    const rows = demoRows();
+    const rows = sampleRows();
     const cust = rows.customers.map((c: Row) => saveContact({ kind: 'customer', ...c }, admin));
     const vend = rows.vendors.map((v: Row) => saveContact({ kind: 'vendor', ...v }, admin));
     const tax = (rate: number) => d.value<number>('SELECT id FROM taxes WHERE rate = ? AND is_active = 1', rate);
@@ -102,8 +109,7 @@ export function seedDemo() {
 
     // Inter-state invoice with e-invoice + e-way bill
     const inv2 = createDocument('invoice', { date: day(18), contact_id: cust[1], warehouse_id: wh1, salesperson: 'Priya Sharma', lines: [{ item_id: controller, qty: 2, rate: 2400, tracking: [{ serial_no: 'CTL-0001' }, { serial_no: 'CTL-0002' }] }, { item_id: copper, qty: 10, rate: 960 }, { item_id: bearing, qty: 50, rate: 75 }] }, admin, { submit: true });
-    act(inv2, 'einvoice_generate');
-    act(inv2, 'eway_generate', { distance: 840, transport_mode: 'road', vehicle_no: 'KA05AB4321', transporter_name: 'Swift Road Carriers', force: true });
+    act(inv2, 'eway_record', { ewb_no: '381000123456', ewb_date: `${day(18)}T10:30:00`, distance: 840, transport_mode: 'road', vehicle_no: 'KA05AB4321', transporter_name: 'Swift Road Carriers' });
     const inv2Total = d.value<number>('SELECT total FROM documents WHERE id = ?', inv2);
     createPayment({ kind: 'received', date: day(5), contact_id: cust[1], amount: inv2Total, account_id: icici, mode: 'neft', reference: 'NEFT-MEW-3301', allocations: [{ document_id: inv2, amount: inv2Total }] }, admin);
 
@@ -191,11 +197,46 @@ export function seedDemo() {
     ] });
     saveManualJournal({ date: day(1), reference: 'PREPAID-INS', memo: 'Insurance premium prepaid portion', lines: [{ account_id: acct('prepaid_expenses'), debit: 24000 }, { account_id: hdfc, credit: 24000 }] }, admin);
 
-    // Approval policy and a workflow rule to showcase automation
+    // Approval policy and a workflow rule
     const accountantRole = d.value<number>("SELECT id FROM roles WHERE name = 'Accountant'");
     setKv('approvals', { purchase_order: { mode: 'simple', levels: [] }, purchase_request: { mode: 'simple', levels: [] }, bill: { mode: 'multi', levels: [accountantRole] } });
     saveWorkflow({ name: 'Alert on large invoices', module: 'invoice', trigger: 'on_create', conditions: [{ field: 'total', op: 'gte', value: 100000 }], actions: [{ type: 'notify', to: 'admins', title: 'Large invoice ${number} created', body: 'Invoice total ₹${total} for ${contact_name}' }] });
     void wcAsm; void wcTest; void wcWind; void wcCut; void so1;
   });
   return true;
+}
+
+const SAMPLE_ORG = {
+  name: 'Kaveri Pumps & Motors',
+  legal_name: 'Kaveri Pumps and Motors Private Limited',
+  gstin: makeGstin('29', 'AAKCK4821F'),
+  pan: 'AAKCK4821F',
+  state_code: '29',
+  address: 'Plot 42, Peenya Industrial Area, 2nd Stage',
+  city: 'Bengaluru',
+  pincode: '560058',
+  email: 'accounts@kaveripumps.example',
+  phone: '+91 80 4123 4567',
+  website: 'kaveripumps.example',
+  industry: 'Manufacturing',
+  setup_complete: true,
+};
+
+function sampleRows(): Row {
+  return {
+    customers: [
+      { name: 'Sri Lakshmi Agro Traders', company_name: 'Sri Lakshmi Agro Traders', gst_treatment: 'business_gst', gstin: makeGstin('29', 'ABVPL7231K'), email: 'purchase@srilakshmi.example', phone: '9845012345', payment_terms: 30, billing_address: 'APMC Yard, Yeshwanthpur', billing_city: 'Bengaluru', billing_pincode: '560022', billing_state: '29' },
+      { name: 'Mehta Engineering Works', company_name: 'Mehta Engineering Works', gst_treatment: 'business_gst', gstin: makeGstin('27', 'AAFFM5512Q'), email: 'stores@mehtaeng.example', phone: '9820098200', payment_terms: 45, billing_address: 'MIDC Bhosari', billing_city: 'Pune', billing_pincode: '411026', billing_state: '27' },
+      { name: 'Coastal Irrigation LLP', company_name: 'Coastal Irrigation LLP', gst_treatment: 'business_gst', gstin: makeGstin('32', 'AALFC3091B'), email: 'ap@coastal.example', phone: '9447012340', payment_terms: 30, billing_address: 'Kakkanad', billing_city: 'Kochi', billing_pincode: '682030', billing_state: '32' },
+      { name: 'Ramesh Kumar', gst_treatment: 'consumer', place_of_supply: '29', email: 'ramesh.k@example.com', phone: '9900112233', payment_terms: 0, billing_address: 'Jayanagar 4th Block', billing_city: 'Bengaluru', billing_pincode: '560011', billing_state: '29' },
+      { name: 'Nile Water Solutions', company_name: 'Nile Water Solutions FZE', gst_treatment: 'overseas', currency_code: 'USD', email: 'buying@nilewater.example', payment_terms: 60, billing_address: 'Jebel Ali Free Zone', billing_city: 'Dubai', billing_country: 'AE', shipping_address: 'Chennai Port', shipping_city: 'Chennai', shipping_pincode: '600001', shipping_state: '33' },
+    ],
+    vendors: [
+      { name: 'Deccan Steel Suppliers', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AADFD6610M'), email: 'sales@deccansteel.example', phone: '9886011122', payment_terms: 30 },
+      { name: 'Ganga Electricals', gst_treatment: 'business_gst', gstin: makeGstin('09', 'AAGFG2290H'), email: 'orders@gangaelec.example', phone: '9415022233', payment_terms: 30 },
+      { name: 'Swift Road Carriers', gst_treatment: 'business_gst', gstin: makeGstin('29', 'ABJFS1180D'), email: 'billing@swiftroad.example', phone: '9845500011', payment_terms: 15 },
+      { name: 'Peenya Estates', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AAEFP4410L'), email: 'rent@peenyaestates.example', phone: '9845700022', payment_terms: 7 },
+      { name: 'Precision Bearings Co', gst_treatment: 'business_gst', gstin: makeGstin('33', 'AAHFP7745N'), email: 'sales@precisionbearings.example', phone: '9443033344', payment_terms: 30 },
+    ],
+  };
 }

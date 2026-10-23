@@ -117,7 +117,7 @@ export default function DocForm() {
       <PageHeader title={`${id ? 'Edit' : 'New'} ${def.label}`} subtitle={form.number}
         back={<Link to={id ? `/docs/${type}/${id}` : `/docs/${type}`} className="mb-1 inline-flex items-center gap-1 text-xs no-underline"><ArrowLeft className="h-3 w-3" />{def.plural}</Link>} />
       <div className="space-y-5 p-5">
-        {form.ref_doc_id && <div className="rounded-md bg-brand-50 px-3 py-2 text-xs text-brand-700">Created from {form.reference ?? `#${form.ref_doc_id}`}</div>}
+        {form.ref_doc_id && <div className="rounded-md bg-brand-50 px-3 py-2 text-xs text-brand-700">Created from {form.ref_doc?.number ?? form.reference ?? `#${form.ref_doc_id}`}</div>}
         <div className="card grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-3">
           {def.party && (
             <Field label={def.party === 'vendor' ? 'Vendor Name' : 'Customer Name'} required={def.partyRequired}>

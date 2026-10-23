@@ -72,6 +72,15 @@ function EmployeeForm() {
             <Check label="Income tax (TDS)" checked={f.tds_enabled} onChange={(v) => set({ tds_enabled: v })} />
           </div>
         </div>
+        <div className="card space-y-3 p-5">
+          <h3>Opening year-to-date (optional)</h3>
+          <p className="text-xs text-slate-600">Salary and TDS for this tax year that were <b>not</b> paid through this system: months paid before you started running payroll here, or pay from a previous employer this year. Do not include pay runs recorded here. Monthly TDS is then calculated on the full year.</p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Tax year" hint="e.g. 2026-27"><Input value={f.ytd_fy ?? ''} placeholder="2026-27" onChange={(e) => set({ ytd_fy: e.target.value || null })} /></Field>
+            <Field label="Gross salary paid (₹)"><Input type="number" value={f.ytd_gross ?? 0} onChange={(e) => set({ ytd_gross: Number(e.target.value) })} /></Field>
+            <Field label="TDS deducted (₹)"><Input type="number" value={f.ytd_tds ?? 0} onChange={(e) => set({ ytd_tds: Number(e.target.value) })} /></Field>
+          </div>
+        </div>
       </div>
       <div className="no-print fixed bottom-0 left-0 right-0 flex gap-2 border-t bg-white px-5 py-3 lg:left-60"><button className="btn btn-primary" disabled={busy} onClick={async () => { const r = await run(() => (id ? put(`/payroll/employees/${id}`, f) : post('/payroll/employees', f)), 'Employee saved'); if (r) nav(`/payroll/employees/${r.id}`); }}>Save</button><button className="btn" onClick={() => nav(-1)}>Cancel</button></div>
     </div>
@@ -217,7 +226,7 @@ function Payslip() {
           </div>
           <div className="mt-4 rounded bg-slate-50 p-3 text-base font-semibold">Net pay: {money(p.net)}{p.withheld ? ' (withheld)' : ''}</div>
           <div className="mt-3 text-[11px] text-slate-500">Employer contributions: {p.employer.map((e: any) => `${e.name} ${money(e.amount)}`).join(' · ')}</div>
-          <div className="mt-6 text-center text-[10px] text-slate-400">This is a system-generated payslip.</div>
+          <div className="mt-6 text-center text-[10px] text-slate-500">This is a system-generated payslip.</div>
         </div>
       </div>
     </div>

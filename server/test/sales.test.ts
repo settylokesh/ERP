@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../src/db.js';
 import { runAction } from '../src/documents/actions.js';
 import { convertDraft, createDocument, createFrom, deleteDocument, getDocument, updateDocument, voidDocument } from '../src/documents/engine.js';
+import { einvoicePayload, ewaybillPayload } from '../src/einvoice.js';
 import { applyCredits, createPayment, createRefund, deletePayment, paymentUnused } from '../src/payments.js';
 import { setKv, getKv, DEFAULT_ORG } from '../src/settings.js';
 import { bal, buy, doc, fresh, inventoryReconciles, sell, stock, trialBalanced, type Ctx } from './helpers.js';
@@ -197,28 +199,51 @@ describe('Approvals and e-invoicing', () => {
     expect(bal('accounts_receivable')).toBe(236);
   });
 
-  it('generates and cancels an IRN, blocking edits while active', () => {
+  it('records and cancels an IRN, blocking edits while active', () => {
+    setKv('org', { ...getKv('org', DEFAULT_ORG), einvoice_enabled: true });
     const inv = sell(c, 1, 200, '2026-05-01');
-    runAction(inv, 'einvoice_generate', {}, c.admin);
+    expect(() => runAction(inv, 'einvoice_record', { irn: 'short', ack_no: '112610000000001', ack_date: '2026-05-01T10:00:00Z' }, c.admin)).toThrow(/64-character/);
+    const irn = createHash('sha256').update('test').digest('hex');
+    runAction(inv, 'einvoice_record', { irn, ack_no: '112610000000001', ack_date: new Date().toISOString(), signed_qr: 'signed.jwt.value' }, c.admin);
     const e = getDocument(inv).data.einvoice;
-    expect(e.irn).toMatch(/^[0-9a-f]{64}$/);
-    expect(e.ack_no).toHaveLength(15);
+    expect(e).toMatchObject({ status: 'generated', irn, ack_no: '112610000000001', signed_qr: 'signed.jwt.value' });
     expect(() => updateDocument(inv, { contact_id: c.cust, lines: [{ item_id: c.widget, qty: 2, rate: 200 }] }, c.admin)).toThrow(/Cancel the e-invoice/);
+    // The same IRN cannot be recorded on a second document.
+    const inv2 = sell(c, 1, 200, '2026-05-01');
+    expect(() => runAction(inv2, 'einvoice_record', { irn, ack_no: '112610000000002', ack_date: new Date().toISOString() }, c.admin)).toThrow(/already recorded/);
     runAction(inv, 'einvoice_cancel', { reason_code: 2 }, c.admin);
-    expect(getDocument(inv).data.einvoice.status).toBe('cancelled');
+    expect(getDocument(inv).data.einvoice).toMatchObject({ status: 'cancelled', cancel_reason: 'Data entry mistake' });
   });
 
-  it('refuses e-invoices for unregistered customers', () => {
+  it('builds the IRP payload with intra-state tax split and credit-note references', () => {
+    const inv = sell(c, 2, 200, '2026-05-01');
+    const { payload } = einvoicePayload(inv);
+    expect(payload).toMatchObject({ Version: '1.1', TranDtls: { SupTyp: 'B2B' }, DocDtls: { Typ: 'INV', Dt: '01/05/2026' } });
+    expect(payload.ItemList[0]).toMatchObject({ HsnCd: '8413', Qty: 2, Unit: 'PCS', UnitPrice: 200, TotAmt: 400, AssAmt: 400, GstRt: 18, CgstAmt: 36, SgstAmt: 36, IgstAmt: 0, TotItemVal: 472 });
+    expect(payload.ValDtls).toMatchObject({ AssVal: 400, CgstVal: 36, SgstVal: 36, TotInvVal: 472 });
+    const line = db().get<any>('SELECT * FROM document_lines WHERE document_id = ?', inv);
+    const cn = createDocument('credit_note', { date: '2026-05-02', contact_id: c.cust, ref_doc_id: inv, lines: [{ item_id: c.widget, qty: 1, rate: 200, tax_id: c.tax18, ref_line_id: line.id }] }, c.admin, { submit: true });
+    const cnPayload = einvoicePayload(cn).payload;
+    expect(cnPayload.DocDtls.Typ).toBe('CRN');
+    expect(cnPayload.RefDtls.PrecDocDtls[0]).toMatchObject({ InvNo: doc(inv).number, InvDt: '01/05/2026' });
+  });
+
+  it('refuses e-invoices for unregistered customers and lists missing data', () => {
     const inv = createDocument('invoice', { date: '2026-05-01', contact_id: c.consumer, lines: [{ item_id: c.service, qty: 1, rate: 1000 }] }, c.admin, { submit: true });
-    expect(() => runAction(inv, 'einvoice_generate', {}, c.admin)).toThrow(/unregistered/);
+    expect(() => einvoicePayload(inv)).toThrow(/unregistered/);
+    setKv('org', { ...getKv('org', DEFAULT_ORG), pincode: '' });
+    expect(() => einvoicePayload(sell(c, 1, 200, '2026-05-01'))).toThrow(/PIN code/);
   });
 
-  it('enforces the e-way bill threshold and vehicle format', () => {
+  it('prepares the e-way bill JSON and records the e-way bill', () => {
     const inv = sell(c, 1, 200, '2026-05-01');
-    expect(() => runAction(inv, 'eway_generate', { distance: 100, vehicle_no: 'KA01AB1234' }, c.admin)).toThrow(/threshold/);
-    expect(() => runAction(inv, 'eway_generate', { distance: 100, vehicle_no: 'XX', force: true }, c.admin)).toThrow(/Vehicle number/);
-    runAction(inv, 'eway_generate', { distance: 450, vehicle_no: 'KA01AB1234', force: true }, c.admin);
-    expect(getDocument(inv).data.ewaybill).toMatchObject({ status: 'generated', validity_days: 3 });
+    expect(() => ewaybillPayload(inv, { distance: 100, transport_mode: 'road', vehicle_no: 'XX' })).toThrow(/Vehicle number/);
+    const { entry } = ewaybillPayload(inv, { distance: 120, transport_mode: 'road', vehicle_no: 'ka 01 ab 1234' });
+    expect(entry).toMatchObject({ supplyType: 'O', subSupplyType: 1, docType: 'INV', docDate: '01/05/2026', vehicleNo: 'KA01AB1234', vehicleType: 'R', transMode: 1, fromStateCode: 29, toStateCode: 29, mainHsnCode: 8413 });
+    expect(entry.itemList[0]).toMatchObject({ hsnCode: 8413, quantity: 1, qtyUnit: 'PCS', taxableAmount: 200, cgstRate: 9, sgstRate: 9, igstRate: 0 });
+    expect(() => runAction(inv, 'eway_record', { ewb_no: '123', distance: 450, vehicle_no: 'KA01AB1234' }, c.admin)).toThrow(/12-digit/);
+    runAction(inv, 'eway_record', { ewb_no: '381000123456', ewb_date: '2026-05-01T09:00:00Z', distance: 450, transport_mode: 'road', vehicle_no: 'KA01AB1234' }, c.admin);
+    expect(getDocument(inv).data.ewaybill).toMatchObject({ status: 'generated', ewb_no: '381000123456', validity_days: 3, valid_until: '2026-05-04T23:59:59' });
   });
 
   it('keeps org preferences when settings are partially stored', () => {

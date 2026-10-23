@@ -1,13 +1,16 @@
-import { DEFAULT_ROLES, hashPassword } from './auth.js';
-import { db, openDb, type Row } from './db.js';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { audit } from './activity.js';
+import { assertPasswordStrength, DEFAULT_ROLES, hashPassword, loadUser } from './auth.js';
+import { db, fail, openDb } from './db.js';
 import { postOpeningJournal, repostJournal } from './documents/posting.js';
 import { DOC_TYPES } from './documents/types.js';
 import { setReposter } from './inventory.js';
 import { acct, seedAccounts } from './ledger.js';
 import { postMoJournal } from './manufacturing.js';
 import { DEFAULT_COMPONENTS, DEFAULT_PT_SLABS } from './payroll.js';
-import { DEFAULT_ORG, DEFAULT_SEQUENCES, getKv, setKv } from './settings.js';
-import { makeGstin } from './util.js';
+import { migrate } from './migrations.js';
+import { DEFAULT_ORG, DEFAULT_SEQUENCES, getKv, setKv, validateOrgProfile, type OrgSettings } from './settings.js';
+import { fiscalYear, isEmail, pick, today } from './util.js';
 
 /** Wires the inventory revaluation callback to the journal builders. */
 export function registerHooks() {
@@ -34,18 +37,19 @@ const TDS: [string, string, number][] = [
   ['194H', 'Commission or brokerage', 2], ['194Q', 'Purchase of goods', 0.1],
 ];
 
-/** Idempotent base configuration every organisation needs. */
-export function bootstrap(opts: { adminEmail?: string; adminPassword?: string; orgName?: string } = {}) {
+/**
+ * Idempotent base configuration every organisation needs: the chart of accounts, GST and TDS rates, the first
+ * warehouse, numbering series, default roles, salary components, professional-tax slabs and fixed-asset types.
+ * It never creates users or business data: the organisation profile and first administrator come from first-run setup
+ * (the setup screen, or environment variables for unattended installs - see index.ts).
+ */
+export function bootstrap() {
   const d = db();
   registerHooks();
+  migrate(d);
   d.tx(() => {
     seedAccounts();
-    if (!d.get('SELECT 1 FROM currencies')) {
-      // Foreign currency rates are placeholders - maintain them in Settings > Currencies before use.
-      for (const [code, name, symbol, rate, base] of [['INR', 'Indian Rupee', '₹', 1, 1], ['USD', 'US Dollar', '$', 88, 0], ['EUR', 'Euro', '€', 102, 0], ['GBP', 'Pound Sterling', '£', 117, 0], ['AED', 'UAE Dirham', 'AED', 24, 0]] as const) {
-        d.insert('currencies', { code, name, symbol, rate, is_base: base });
-      }
-    }
+    if (!d.get('SELECT 1 FROM currencies')) d.insert('currencies', { code: 'INR', name: 'Indian Rupee', symbol: '₹', rate: 1, is_base: 1 });
     if (!d.get('SELECT 1 FROM taxes')) for (const [name, rate, active] of TAXES) d.insert('taxes', { name, rate, is_active: active });
     if (!d.get('SELECT 1 FROM tds_sections')) for (const [section, name, rate] of TDS) d.insert('tds_sections', { section, name, rate });
     if (!d.get('SELECT 1 FROM warehouses')) d.insert('warehouses', { name: 'Primary Warehouse', code: 'WH-01', is_primary: 1, state_code: null });
@@ -55,61 +59,79 @@ export function bootstrap(opts: { adminEmail?: string; adminPassword?: string; o
     if (!d.get('SELECT 1 FROM roles')) {
       for (const r of DEFAULT_ROLES) d.insert('roles', { name: r.name, description: r.description, is_admin: r.is_admin ? 1 : 0, permissions: JSON.stringify(r.permissions) });
     }
-    if (!d.get('SELECT 1 FROM users')) {
-      const adminRole = d.value<number>('SELECT id FROM roles WHERE is_admin = 1 LIMIT 1');
-      d.insert('users', { name: 'Administrator', email: opts.adminEmail ?? 'admin@saral.local', password_hash: hashPassword(opts.adminPassword ?? 'admin123'), role_id: adminRole });
-    }
     if (!d.get('SELECT 1 FROM salary_components')) for (const c of DEFAULT_COMPONENTS) d.insert('salary_components', c);
     if (!d.get('SELECT 1 FROM pt_slabs')) for (const s of DEFAULT_PT_SLABS) d.insert('pt_slabs', s);
-    if (!d.get("SELECT 1 FROM kv WHERE key = 'org'")) setKv('org', { ...DEFAULT_ORG, name: opts.orgName ?? DEFAULT_ORG.name });
+    if (!d.get("SELECT 1 FROM kv WHERE key = 'org'")) setKv('org', DEFAULT_ORG);
     if (!d.get('SELECT 1 FROM asset_types')) {
+      // Useful lives follow Schedule II of the Companies Act, 2013 (plant 15 years, computers 3 years, furniture 10 years).
       d.insert('asset_types', { name: 'Plant and Machinery', asset_account_id: acct('machinery'), depreciation_account_id: acct('depreciation'), accumulated_account_id: acct('accumulated_depreciation'), method: 'slm', useful_life_months: 180, wdv_rate: 0 });
       d.insert('asset_types', { name: 'Computers', asset_account_id: acct('computers'), depreciation_account_id: acct('depreciation'), accumulated_account_id: acct('accumulated_depreciation'), method: 'slm', useful_life_months: 36, wdv_rate: 0 });
       d.insert('asset_types', { name: 'Furniture and Fixtures', asset_account_id: acct('furniture'), depreciation_account_id: acct('depreciation'), accumulated_account_id: acct('accumulated_depreciation'), method: 'wdv', useful_life_months: 120, wdv_rate: 25.89 });
     }
-    for (const n of ['Production', 'Sales', 'Accounts', 'Stores', 'Human Resources']) if (!d.get('SELECT 1 FROM departments WHERE name = ?', n)) d.insert('departments', { name: n });
-    for (const n of ['Machine Operator', 'Production Supervisor', 'Sales Executive', 'Accountant', 'Store Keeper', 'HR Executive']) if (!d.get('SELECT 1 FROM designations WHERE name = ?', n)) d.insert('designations', { name: n });
   });
   return getKv('org', DEFAULT_ORG);
 }
 
-export function initDatabase(file: string, opts: Parameters<typeof bootstrap>[0] = {}) {
+export function initDatabase(file: string) {
   openDb(file);
-  bootstrap(opts);
+  bootstrap();
   return db();
 }
 
-export const DEMO_ORG = {
-  name: 'Kaveri Pumps & Motors',
-  legal_name: 'Kaveri Pumps and Motors Private Limited',
-  gstin: makeGstin('29', 'AAKCK4821F'),
-  pan: 'AAKCK4821F',
-  state_code: '29',
-  address: 'Plot 42, Peenya Industrial Area, 2nd Stage',
-  city: 'Bengaluru',
-  pincode: '560058',
-  email: 'accounts@kaveripumps.example',
-  phone: '+91 80 4123 4567',
-  website: 'kaveripumps.example',
-  industry: 'Manufacturing',
-  setup_complete: true,
-};
+/** True until the first administrator exists. */
+export const needsSetup = () => !db().get('SELECT 1 FROM users');
 
-export function demoRows(): Row {
-  return {
-    customers: [
-      { name: 'Sri Lakshmi Agro Traders', company_name: 'Sri Lakshmi Agro Traders', gst_treatment: 'business_gst', gstin: makeGstin('29', 'ABVPL7231K'), email: 'purchase@srilakshmi.example', phone: '9845012345', payment_terms: 30, billing_address: 'APMC Yard, Yeshwanthpur, Bengaluru 560022' },
-      { name: 'Mehta Engineering Works', company_name: 'Mehta Engineering Works', gst_treatment: 'business_gst', gstin: makeGstin('27', 'AAFFM5512Q'), email: 'stores@mehtaeng.example', phone: '9820098200', payment_terms: 45, billing_address: 'MIDC Bhosari, Pune 411026' },
-      { name: 'Coastal Irrigation LLP', company_name: 'Coastal Irrigation LLP', gst_treatment: 'business_gst', gstin: makeGstin('32', 'AALFC3091B'), email: 'ap@coastal.example', phone: '9447012340', payment_terms: 30, billing_address: 'Kakkanad, Kochi 682030' },
-      { name: 'Ramesh Kumar', gst_treatment: 'consumer', place_of_supply: '29', email: 'ramesh.k@example.com', phone: '9900112233', payment_terms: 0, billing_address: 'Jayanagar 4th Block, Bengaluru' },
-      { name: 'Nile Water Solutions', company_name: 'Nile Water Solutions FZE', gst_treatment: 'overseas', currency_code: 'USD', email: 'buying@nilewater.example', payment_terms: 60, billing_address: 'Jebel Ali Free Zone, Dubai, UAE' },
-    ],
-    vendors: [
-      { name: 'Deccan Steel Suppliers', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AADFD6610M'), email: 'sales@deccansteel.example', phone: '9886011122', payment_terms: 30 },
-      { name: 'Ganga Electricals', gst_treatment: 'business_gst', gstin: makeGstin('09', 'AAGFG2290H'), email: 'orders@gangaelec.example', phone: '9415022233', payment_terms: 30 },
-      { name: 'Swift Road Carriers', gst_treatment: 'business_gst', gstin: makeGstin('29', 'ABJFS1180D'), email: 'billing@swiftroad.example', phone: '9845500011', payment_terms: 15 },
-      { name: 'Peenya Estates', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AAEFP4410L'), email: 'rent@peenyaestates.example', phone: '9845700022', payment_terms: 7 },
-      { name: 'Precision Bearings Co', gst_treatment: 'business_gst', gstin: makeGstin('33', 'AAHFP7745N'), email: 'sales@precisionbearings.example', phone: '9443033344', payment_terms: 30 },
-    ],
-  };
+let setupCode: string | null = null;
+/**
+ * One-time code required by POST /api/setup, so that a freshly started server reachable from a network cannot be
+ * claimed by whoever finds it first. It is printed to the server log at start-up; set SETUP_TOKEN to choose it.
+ */
+export function setupToken(): string {
+  return (setupCode ??= process.env.SETUP_TOKEN || randomBytes(6).toString('hex').toUpperCase().replace(/(.{4})(?=.)/g, '$1-'));
+}
+export function checkSetupToken(given: unknown) {
+  const a = Buffer.from(String(given ?? '').trim().toUpperCase());
+  const b = Buffer.from(setupToken().toUpperCase());
+  if (a.length !== b.length || !timingSafeEqual(a, b)) fail('The setup code is not correct. It is shown in the server log when the server starts.', 403);
+}
+
+function createAdmin(a: { name: string; email: string; password: string }) {
+  const d = db();
+  const email = String(a.email ?? '').trim().toLowerCase();
+  if (!isEmail(email)) fail('A valid administrator email is required', 422);
+  assertPasswordStrength(a.password);
+  const adminRole = d.value<number>('SELECT id FROM roles WHERE is_admin = 1 ORDER BY id LIMIT 1') ?? fail('Admin role is missing', 500);
+  return d.insert('users', { name: String(a.name ?? '').trim() || 'Administrator', email, password_hash: hashPassword(String(a.password)), role_id: adminRole });
+}
+
+export interface SetupInput {
+  organisation: Partial<OrgSettings> & { name: string; state_code: string };
+  admin: { name: string; email: string; password: string };
+}
+
+/**
+ * First-run setup: records the organisation profile and creates the first administrator. Only allowed while no user
+ * exists, so it cannot be used to take over an installed system.
+ */
+export function completeSetup(input: SetupInput) {
+  const d = db();
+  return d.tx(() => {
+    if (!needsSetup()) fail('Setup has already been completed. Sign in instead.', 409);
+    const o = input?.organisation ?? ({} as SetupInput['organisation']);
+    const fyMonth = Number(o.fiscal_year_start_month ?? DEFAULT_ORG.fiscal_year_start_month);
+    const next = validateOrgProfile({
+      ...pick(o, ['name', 'legal_name', 'gstin', 'pan', 'state_code', 'address', 'city', 'pincode', 'email', 'phone', 'website', 'industry', 'valuation_method'] as (keyof OrgSettings)[]),
+      fiscal_year_start_month: fyMonth,
+      // Opening stock and balances default to the first day of the current financial year.
+      inventory_start_date: o.inventory_start_date || (fyMonth >= 1 && fyMonth <= 12 ? fiscalYear(today(), fyMonth).start : ''),
+      einvoice_enabled: !!o.einvoice_enabled,
+      setup_complete: true,
+    });
+    const name = next.name;
+    setKv('org', next);
+    d.run('UPDATE warehouses SET state_code = ? WHERE is_primary = 1 AND state_code IS NULL', next.state_code);
+    const userId = createAdmin(input.admin ?? ({} as SetupInput['admin']));
+    audit('settings', null, 'setup', `Organisation ${name} set up`, loadUser(userId));
+    return { org: next, user_id: userId };
+  });
 }

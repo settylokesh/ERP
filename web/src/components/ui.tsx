@@ -110,16 +110,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((kind: Toast['kind'], text: string) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t, { id, kind, text }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'error' ? 7000 : 3500);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'error' ? Math.min(15000, 6000 + text.length * 40) : 3500);
   }, []);
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div className="no-print fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2" role="status" aria-live="polite">
+      <div className="no-print fixed bottom-4 right-4 z-[60] flex w-96 max-w-[calc(100vw-2rem)] flex-col gap-2" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`card flex items-start gap-2 p-3 text-[13px] ${t.kind === 'error' ? 'border-red-200 text-red-700' : t.kind === 'success' ? 'border-emerald-200 text-emerald-800' : 'text-slate-700'}`}>
             {t.kind === 'error' ? <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> : t.kind === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <Info className="mt-0.5 h-4 w-4 shrink-0" />}
-            <span>{t.text}</span>
+            <span className="whitespace-pre-line">{t.text}</span>
           </div>
         ))}
       </div>

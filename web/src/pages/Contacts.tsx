@@ -31,7 +31,7 @@ function List({ kind }: { kind: Kind }) {
         <ErrorBox error={error} />
         {loading && !data ? <Spinner /> : (
           <DataTable exportName={`${kind}s`} rows={data ?? []} onRow={(r) => nav(`${base(kind)}/${r.id}`)} cols={[
-            { key: 'name', label: 'Name', render: (r) => <span className="link font-medium">{r.name}{!r.is_active && <span className="ml-1 text-xs text-slate-400">(inactive)</span>}</span> },
+            { key: 'name', label: 'Name', render: (r) => <span className="link font-medium">{r.name}{!r.is_active && <span className="ml-1 text-xs text-slate-500">(inactive)</span>}</span> },
             { key: 'company_name', label: 'Company' }, { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
             { key: 'gst_treatment', label: 'GST Treatment', render: (r) => meta.gst_treatments[r.gst_treatment] },
             { key: 'gstin', label: 'GSTIN' },
@@ -39,7 +39,7 @@ function List({ kind }: { kind: Kind }) {
           ]} />
         )}
       </div>
-      {imp && <ImportModal path={`/contacts/import?kind=${kind}`} onClose={() => setImp(false)} onDone={reload} sample={'name,company_name,email,phone,gst_treatment,gstin,payment_terms\nAcme Traders,Acme Traders,acme@example.com,9800000000,business_gst,27AAPFU0939F1ZV,30'} />}
+      {imp && <ImportModal path={`/contacts/import?kind=${kind}`} onClose={() => setImp(false)} onDone={reload} sample={'name,company_name,email,phone,gst_treatment,gstin,payment_terms,billing_address,billing_city,billing_pincode\nAcme Traders,Acme Traders,acme@example.com,9800000000,business_gst,27AAPFU0939F1ZV,30,Shop 4 MG Road,Pune,411001'} />}
     </div>
   );
 }
@@ -79,8 +79,26 @@ function Form({ kind }: { kind: Kind }) {
           <Field label="Opening Balance (₹)" hint={`As of ${date(meta.org.inventory_start_date)}`}><Input type="number" value={f.opening_balance ?? 0} onChange={(e) => set({ opening_balance: Number(e.target.value) })} /></Field>
         </div>
         <div className="card grid gap-4 p-5 sm:grid-cols-2">
-          <Field label="Billing Address"><Textarea value={f.billing_address ?? ''} onChange={(e) => set({ billing_address: e.target.value })} /></Field>
-          <Field label="Shipping Address"><Textarea value={f.shipping_address ?? ''} onChange={(e) => set({ shipping_address: e.target.value })} /></Field>
+          <fieldset className="space-y-3">
+            <legend className="mb-1 text-[13px] font-semibold text-slate-700">Billing address</legend>
+            <Field label="Street address"><Textarea rows={2} value={f.billing_address ?? ''} onChange={(e) => set({ billing_address: e.target.value })} /></Field>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="City"><Input value={f.billing_city ?? ''} onChange={(e) => set({ billing_city: e.target.value })} /></Field>
+              <Field label={f.gst_treatment === 'overseas' ? 'Postal code' : 'PIN code'}><Input value={f.billing_pincode ?? ''} onChange={(e) => set({ billing_pincode: e.target.value })} /></Field>
+            </div>
+            {f.gst_treatment === 'overseas'
+              ? <Field label="Country code" hint="2-letter ISO code, e.g. AE, US, GB (needed on export e-invoices)"><Input maxLength={2} value={f.billing_country ?? ''} onChange={(e) => set({ billing_country: e.target.value.toUpperCase() })} /></Field>
+              : <Field label="State"><StateSelect value={f.billing_state ?? ''} onChange={(v) => set({ billing_state: v })} /></Field>}
+          </fieldset>
+          <fieldset className="space-y-3">
+            <legend className="mb-1 text-[13px] font-semibold text-slate-700">Shipping address</legend>
+            <Field label="Street address" hint={f.gst_treatment === 'overseas' ? 'For exports, the port or place in India the goods leave from' : 'Leave blank if the same as billing'}><Textarea rows={2} value={f.shipping_address ?? ''} onChange={(e) => set({ shipping_address: e.target.value })} /></Field>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="City"><Input value={f.shipping_city ?? ''} onChange={(e) => set({ shipping_city: e.target.value })} /></Field>
+              <Field label="PIN code"><Input value={f.shipping_pincode ?? ''} onChange={(e) => set({ shipping_pincode: e.target.value })} /></Field>
+            </div>
+            <Field label="State"><StateSelect value={f.shipping_state ?? ''} onChange={(v) => set({ shipping_state: v })} /></Field>
+          </fieldset>
           <Field label="Notes" className="sm:col-span-2"><Textarea value={f.notes ?? ''} onChange={(e) => set({ notes: e.target.value })} /></Field>
           <div className="sm:col-span-2"><CustomFieldInputs module={kind} value={f.custom ?? {}} onChange={(v) => set({ custom: v })} /></div>
           <Check label="Active" checked={f.is_active !== 0 && f.is_active !== false} onChange={(v) => set({ is_active: v })} />
@@ -127,7 +145,7 @@ function View({ kind }: { kind: Kind }) {
             </div>
             <div className="grid gap-4 lg:grid-cols-2">
               <div className="card p-4"><h3 className="mb-2">Contact details</h3><KeyVal items={[['Email', c.email], ['Phone', c.phone], ['GSTIN', c.gstin], ['PAN', c.pan], ['Place of supply', c.place_of_supply && `${meta.states[c.place_of_supply]} (${c.place_of_supply})`], ['Currency', c.currency_code], ['Credit limit', c.credit_limit != null ? money(c.credit_limit) : null], ['Opening balance', money(c.opening_balance)]]} /></div>
-              <div className="card p-4"><h3 className="mb-2">Addresses</h3><KeyVal items={[['Billing', <span className="whitespace-pre-line">{c.billing_address}</span>], ['Shipping', <span className="whitespace-pre-line">{c.shipping_address}</span>], ['Notes', c.notes]]} /></div>
+              <div className="card p-4"><h3 className="mb-2">Addresses</h3><KeyVal items={[['Billing', <span className="whitespace-pre-line">{[c.billing_address, [c.billing_city, c.billing_pincode].filter(Boolean).join(' - '), meta.states[c.billing_state] ?? c.billing_country].filter(Boolean).join('\n')}</span>], ['Shipping', <span className="whitespace-pre-line">{[c.shipping_address, [c.shipping_city, c.shipping_pincode].filter(Boolean).join(' - '), meta.states[c.shipping_state]].filter(Boolean).join('\n')}</span>], ['Notes', c.notes]]} /></div>
             </div>
           </>
         )}

@@ -12,7 +12,10 @@ const MODES = ['bank_transfer', 'neft', 'rtgs', 'imps', 'upi', 'cheque', 'cash',
 
 function List() {
   const { kind = 'received' } = useParams();
-  const { data, loading, error } = useApi<any>(`/payments/${kind}`);
+  const [page, setPage] = useState(0);
+  const PAGE = 100;
+  useEffect(() => setPage(0), [kind]);
+  const { data, loading, error } = useApi<any>(`/payments/${kind}?limit=${PAGE}&offset=${page * PAGE}`);
   const nav = useNavigate();
   const can = useCan();
   const mod = kind === 'made' ? 'purchases' : 'sales';
@@ -27,7 +30,11 @@ function List() {
             { key: 'reference', label: 'Reference' }, { key: 'contact_name', label: kind === 'made' ? 'Vendor' : 'Customer' },
             { key: 'mode', label: 'Mode', render: (r) => titleCase(r.mode) }, { key: 'account_name', label: kind === 'made' ? 'Paid Through' : 'Deposit To' },
             { key: 'amount', label: 'Amount', num: true, render: (r) => money(r.amount) }, { key: 'unused', label: 'Unused', num: true, render: (r) => money(r.unused) },
-          ]} />
+          ]} footer={data && data.total > PAGE ? <tr><td colSpan={8} className="text-center text-xs text-slate-600">
+            <span className="mr-3">{page * PAGE + 1}–{page * PAGE + data.rows.length} of {data.total}</span>
+            <button className="btn btn-sm mr-1" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button>
+            <button className="btn btn-sm" disabled={(page + 1) * PAGE >= data.total} onClick={() => setPage(page + 1)}>Next</button>
+          </td></tr> : undefined} />
         )}
       </div>
     </div>

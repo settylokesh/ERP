@@ -1,13 +1,20 @@
 import { Download } from 'lucide-react';
 import { useState } from 'react';
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Route, Routes, useSearchParams } from 'react-router-dom';
 import { download, post } from '../api';
 import { DataTable } from '../components/DataTable';
-import { Badge, ErrorBox, Field, Input, PageHeader, Spinner, Stat, Tabs, Textarea, useAction } from '../components/ui';
+import { Badge, ErrorBox, Field, Input, PageHeader, Spinner, Stat, Tabs, Textarea, useAction, useToast } from '../components/ui';
 import { date, dateTime, money } from '../lib/format';
 import { useApi, useMeta } from '../lib/hooks';
 
 const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); };
+/** Return period from ?period=YYYY-MM (so links such as the dashboard reminder open the right month), else last month. */
+function usePeriod(): [string, (p: string) => void] {
+  const [params, setParams] = useSearchParams();
+  const p = params.get('period');
+  const period = p && /^\d{4}-(0[1-9]|1[0-2])$/.test(p) ? p : prevMonth();
+  return [period, (next: string) => setParams((cur) => { const n = new URLSearchParams(cur); if (next) n.set('period', next); else n.delete('period'); return n; }, { replace: true })];
+}
 const taxCols = [
   { key: 'txval', label: 'Taxable Value', num: true, render: (r: any) => money(r.txval) }, { key: 'iamt', label: 'IGST', num: true, render: (r: any) => money(r.iamt) },
   { key: 'camt', label: 'CGST', num: true, render: (r: any) => money(r.camt) }, { key: 'samt', label: 'SGST', num: true, render: (r: any) => money(r.samt) },
@@ -22,7 +29,7 @@ const invCols = (party: boolean) => [
 ];
 
 function Gstr1() {
-  const [period, setPeriod] = useState(prevMonth());
+  const [period, setPeriod] = usePeriod();
   const { data, error, loading } = useApi<any>(`/gst/gstr1?period=${period}`);
   const [tab, setTab] = useState('summary');
   return (
@@ -34,7 +41,7 @@ function Gstr1() {
         <ErrorBox error={error} />
         {!data || loading ? <Spinner /> : (
           <>
-            {!data.gstin && <div className="rounded-md bg-amber-50 p-3 text-amber-800">Set your GSTIN in <Link to="/settings">Settings</Link> before filing.</div>}
+            {!data.gstin && <p className="rounded-md bg-amber-50 p-3 text-amber-800">Set your GSTIN in <Link to="/settings">Settings</Link> before filing.</p>}
             {tab === 'summary' && <DataTable rows={data.summary} cols={[{ key: 'section', label: 'Section' }, { key: 'count', label: 'Records', num: true }, ...taxCols]} />}
             {tab === 'b2b' && <DataTable rows={data.b2b} cols={[...invCols(true), { key: 'inv_typ', label: 'Type' }, { key: 'irn', label: 'IRN', render: (r: any) => (r.irn ? '✓' : '') }]} />}
             {tab === 'b2cl' && <DataTable rows={data.b2cl} cols={invCols(false)} />}
@@ -51,7 +58,7 @@ function Gstr1() {
 }
 
 function Gstr3b() {
-  const [period, setPeriod] = useState(prevMonth());
+  const [period, setPeriod] = usePeriod();
   const { data, error, loading } = useApi<any>(`/gst/gstr3b?period=${period}`);
   return (
     <div>
@@ -83,7 +90,7 @@ function Gstr3b() {
 }
 
 function Gstr2b() {
-  const [period, setPeriod] = useState(prevMonth());
+  const [period, setPeriod] = usePeriod();
   const [text, setText] = useState('');
   const [result, setResult] = useState<any>(null);
   const { run, busy } = useAction();
@@ -120,20 +127,33 @@ function Gstr2b() {
   );
 }
 
+const EINVOICE_TREATMENTS = ['business_gst', 'business_composition', 'sez', 'deemed_export', 'overseas'];
 function EInvoices() {
   const { data } = useApi<any[]>('/gst/einvoices');
   const { meta } = useMeta();
   const [filter, setFilter] = useState('');
-  const rows = (data ?? []).filter((r) => !filter || (filter === 'pending' ? r.einvoice_status !== 'generated' : filter === 'irn' ? r.einvoice_status === 'generated' : r.ewaybill_status === 'generated'));
+  const { run, busy } = useAction();
+  const toast = useToast();
+  const eligible = (r: any) => r.type !== 'delivery_challan' && EINVOICE_TREATMENTS.includes(r.gst_treatment);
+  const rows = (data ?? []).filter((r) => !filter || (filter === 'pending' ? eligible(r) && r.einvoice_status !== 'generated' : filter === 'irn' ? r.einvoice_status === 'generated' : r.ewaybill_status === 'generated'));
+  const pending = (data ?? []).filter((r) => eligible(r) && r.einvoice_status !== 'generated');
   return (
     <div>
-      <PageHeader title="e-Invoices & e-Way Bills" subtitle={`IRP / NIC integration runs in sandbox mode (IRN computed per the e-invoice schema; no live GSP credentials). e-Way bill threshold ₹${meta.org.eway_threshold}.`} />
+      <PageHeader title="e-Invoices & e-Way Bills"
+        subtitle={`Download the government JSON, generate the IRN or e-way bill on the portal, then record the result on the document. e-Way bills are needed above ₹${Number(meta.org.eway_threshold).toLocaleString('en-IN')}.`}
+        actions={<button className="btn btn-primary" disabled={busy || !pending.length} onClick={async () => {
+          const check = await run(() => post('/gst/einvoice-export?check=1', { ids: pending.map((r) => r.id) }));
+          if (!check) return;
+          if (check.problems.length) toast('error', `${check.problems.length} document(s) skipped:\n${check.problems.slice(0, 8).map((p: any) => `${p.number}: ${p.error.replace(/^The e-invoice cannot be prepared:\n/, '')}`).join('\n')}`);
+          if (check.ready.length) await run(() => download('/gst/einvoice-export', 'einvoices.json', { ids: check.ready.map((r: any) => r.id) }), `${check.ready.length} e-invoice(s) exported`);
+        }}><Download className="h-4 w-4" />Export pending e-invoices ({pending.length})</button>} />
       <div className="space-y-3 p-5">
-        <div className="flex gap-1">{[['', 'All'], ['pending', 'IRN pending'], ['irn', 'IRN generated'], ['ewb', 'e-Way bill active']].map(([k, l]) => <button key={k} className={`chip cursor-pointer px-3 py-1 ${filter === k ? 'bg-brand-600 text-white' : 'bg-white ring-1 ring-slate-200'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
+        {!meta.org.einvoice_enabled && <p className="rounded-md bg-amber-50 p-3 text-amber-800">e-Invoicing is turned off for this organisation. Turn it on in <Link to="/settings">Settings → Organisation</Link> if your turnover requires it.</p>}
+        <div className="flex gap-1">{[['', 'All'], ['pending', 'IRN pending'], ['irn', 'IRN recorded'], ['ewb', 'e-Way bill active']].map(([k, l]) => <button key={k} className={`chip cursor-pointer px-3 py-1 ${filter === k ? 'bg-brand-600 text-white' : 'bg-white ring-1 ring-slate-200'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
         <DataTable exportName="einvoices" rows={rows} cols={[
           { key: 'date', label: 'Date', render: (r) => date(r.date) }, { key: 'number', label: 'Document', render: (r) => <Link to={`/docs/${r.type}/${r.id}`}>{r.number}</Link> },
           { key: 'contact_name', label: 'Customer' }, { key: 'gstin', label: 'GSTIN' }, { key: 'total', label: 'Value', num: true, render: (r) => money(r.total) },
-          { key: 'einvoice_status', label: 'e-Invoice', render: (r) => (r.einvoice_status ? <Badge status={r.einvoice_status} /> : <span className="text-xs text-slate-400">-</span>) },
+          { key: 'einvoice_status', label: 'e-Invoice', render: (r) => (r.einvoice_status ? <Badge status={r.einvoice_status} label={r.einvoice_status === 'generated' ? 'IRN recorded' : undefined} /> : <span className="text-xs text-slate-500">{eligible(r) ? 'Pending' : 'Not applicable'}</span>) },
           { key: 'ack_no', label: 'Ack No' },
           { key: 'ewaybill_status', label: 'e-Way Bill', render: (r) => (r.ewaybill_status ? <span><Badge status={r.ewaybill_status} /> <span className="text-xs">{r.ewb_no}</span></span> : '-') },
           { key: 'ewb_valid_until', label: 'Valid until', render: (r) => (r.ewb_valid_until ? dateTime(r.ewb_valid_until) : '') },

@@ -88,17 +88,17 @@ function BomForm() {
         <div className="card overflow-x-auto p-4"><h3 className="mb-2">Components</h3>
           <table className="table min-w-[640px]"><thead><tr><th>Item</th><th className="num w-32">Quantity</th><th className="num w-32">Wastage %</th>{view && <th className="num">Unit cost</th>}<th /></tr></thead>
             <tbody>{f.components.map((c: any, i: number) => <tr key={i}><td><ItemPicker value={c.item_id} onChange={(v) => updC(i, { item_id: v })} filter={(x) => x.type === 'goods'} /></td>
-              <td><Input type="number" className="text-right" value={c.qty} onChange={(e) => updC(i, { qty: Number(e.target.value) })} /></td>
-              <td><Input type="number" className="text-right" value={c.wastage_pct} onChange={(e) => updC(i, { wastage_pct: Number(e.target.value) })} /></td>
+              <td><Input aria-label={`Component ${i + 1} quantity`} type="number" className="text-right" value={c.qty} onChange={(e) => updC(i, { qty: Number(e.target.value) })} /></td>
+              <td><Input aria-label={`Component ${i + 1} wastage %`} type="number" className="text-right" value={c.wastage_pct} onChange={(e) => updC(i, { wastage_pct: Number(e.target.value) })} /></td>
               {view && <td className="num">{money(view.components.find((x: any) => x.item_id === c.item_id)?.avg_cost ?? view.components.find((x: any) => x.item_id === c.item_id)?.purchase_rate)}</td>}
               <td><button className="btn btn-ghost btn-sm" onClick={() => set({ components: f.components.filter((_: any, j: number) => j !== i) })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></button></td></tr>)}</tbody></table>
           <button className="btn btn-sm mt-2" onClick={() => set({ components: [...f.components, { qty: 1, wastage_pct: 0 }] })}><Plus className="h-3.5 w-3.5" />Add component</button>
         </div>
         <div className="card overflow-x-auto p-4"><h3 className="mb-2">Operations (routing)</h3>
           <table className="table min-w-[640px]"><thead><tr><th className="w-10">Seq</th><th>Operation</th><th>Work centre</th><th className="num w-32">Minutes</th><th /></tr></thead>
-            <tbody>{f.operations.map((o: any, i: number) => <tr key={i}><td className="pt-3">{i + 1}</td><td><Input value={o.name ?? ''} onChange={(e) => updO(i, { name: e.target.value })} /></td>
-              <td><Select value={o.work_center_id ?? ''} placeholder="Select" onChange={(e) => updO(i, { work_center_id: Number(e.target.value) })} options={(wcs ?? []).map((w) => ({ value: w.id, label: w.name }))} /></td>
-              <td><Input type="number" className="text-right" value={o.minutes ?? 0} onChange={(e) => updO(i, { minutes: Number(e.target.value) })} /></td>
+            <tbody>{f.operations.map((o: any, i: number) => <tr key={i}><td className="pt-3">{i + 1}</td><td><Input aria-label={`Operation ${i + 1} name`} value={o.name ?? ''} onChange={(e) => updO(i, { name: e.target.value })} /></td>
+              <td><Select aria-label={`Operation ${i + 1} work centre`} value={o.work_center_id ?? ''} placeholder="Select" onChange={(e) => updO(i, { work_center_id: Number(e.target.value) })} options={(wcs ?? []).map((w) => ({ value: w.id, label: w.name }))} /></td>
+              <td><Input aria-label={`Operation ${i + 1} minutes`} type="number" className="text-right" value={o.minutes ?? 0} onChange={(e) => updO(i, { minutes: Number(e.target.value) })} /></td>
               <td><button className="btn btn-ghost btn-sm" onClick={() => set({ operations: f.operations.filter((_: any, j: number) => j !== i) })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></button></td></tr>)}</tbody></table>
           <button className="btn btn-sm mt-2" onClick={() => set({ operations: [...f.operations, { minutes: 0 }] })}><Plus className="h-3.5 w-3.5" />Add operation</button>
         </div>
@@ -207,8 +207,8 @@ function CompleteMo({ mo, onClose, onDone }: { mo: any; onClose: () => void; onD
           <table className="table"><thead><tr><th>Component</th><th className="num">Required</th><th className="num">Available</th><th className="num w-36">Consume</th><th>Batch/Serial</th></tr></thead>
             <tbody>{mo.components.map((c: any, i: number) => (
               <tr key={c.id}><td>{c.item_name}</td><td className="num">{qty(c.required_qty)} {c.unit}</td><td className={`num ${c.shortage > 0 ? 'text-red-600' : ''}`}>{qty(c.on_hand)}</td>
-                <td><Input type="number" className="text-right" value={f.consumption[i].qty} onChange={(e) => setF({ ...f, consumption: f.consumption.map((x: any, j: number) => (j === i ? { ...x, qty: Number(e.target.value) } : x)) })} /></td>
-                <td>{c.tracking === 'serial' ? <Input placeholder="Serials, comma separated" onChange={(e) => setF({ ...f, consumption: f.consumption.map((x: any, j: number) => (j === i ? { ...x, tracking: e.target.value.split(',').map((s) => s.trim()).filter(Boolean).map((s) => ({ serial_no: s })) } : x)) })} />
+                <td><Input aria-label={`Quantity consumed of ${c.item_name ?? `component ${i + 1}`}`} type="number" className="text-right" value={f.consumption[i].qty} onChange={(e) => setF({ ...f, consumption: f.consumption.map((x: any, j: number) => (j === i ? { ...x, qty: Number(e.target.value) } : x)) })} /></td>
+                <td>{c.tracking === 'serial' ? <Input aria-label="Serial numbers" placeholder="Serials, comma separated" onChange={(e) => setF({ ...f, consumption: f.consumption.map((x: any, j: number) => (j === i ? { ...x, tracking: e.target.value.split(',').map((s) => s.trim()).filter(Boolean).map((s) => ({ serial_no: s })) } : x)) })} />
                   : c.tracking === 'batch' ? <span className="text-xs text-slate-500">Auto-allocated by earliest expiry</span> : '-'}</td></tr>
             ))}</tbody></table>
         </div>
@@ -239,7 +239,7 @@ function InspectionModal({ inspectionId, onClose, onDone }: { inspectionId: numb
           <table className="table"><thead><tr><th>Parameter</th><th>Specification</th><th>Observed</th><th>Pass</th></tr></thead>
             <tbody>{qi.parameters.map((p: any) => (
               <tr key={p.name}><td>{p.name}</td><td>{p.type === 'numeric' ? `${p.min ?? '-'} to ${p.max ?? '-'}` : 'Pass / fail'}</td>
-                <td>{p.type === 'numeric' && <Input type="number" value={f.results[p.name]?.value ?? ''} onChange={(e) => setF({ ...f, results: { ...f.results, [p.name]: { ...f.results[p.name], value: e.target.value } } })} />}</td>
+                <td>{p.type === 'numeric' && <Input aria-label={`${p.name} reading`} type="number" value={f.results[p.name]?.value ?? ''} onChange={(e) => setF({ ...f, results: { ...f.results, [p.name]: { ...f.results[p.name], value: e.target.value } } })} />}</td>
                 <td>{p.type !== 'numeric' ? <Check label="" checked={!!f.results[p.name]?.pass} onChange={(v) => setF({ ...f, results: { ...f.results, [p.name]: { pass: v } } })} /> : <span className="text-xs text-slate-500">auto</span>}</td></tr>
             ))}</tbody></table>
           <div className="grid gap-3 sm:grid-cols-3">
@@ -280,7 +280,7 @@ function OrderView() {
       <div className="space-y-4 p-5">
         {tab === 'overview' && (
           <>
-            {shortages.length > 0 && mo.status !== 'completed' && <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-800">Material shortage: {shortages.map((s: any) => `${s.item_name} (${qty(s.shortage)} ${s.unit})`).join(', ')}. <Link to={`/docs/purchase_order/new`}>Create purchase order</Link></div>}
+            {shortages.length > 0 && mo.status !== 'completed' && <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-800">Material shortage: {shortages.map((s: any) => `${s.item_name} (${qty(s.shortage)} ${s.unit})`).join(', ')}. <Link to={`/docs/purchase_order/new`}>Create purchase order</Link></p>}
             <div className="grid gap-3 sm:grid-cols-4">
               <Stat label="Planned" value={`${qty(mo.qty)} ${mo.unit}`} sub={`${date(mo.planned_start)} → ${date(mo.planned_end)}`} />
               <Stat label="Produced" value={qty(mo.produced_qty)} sub={mo.rejected_qty ? `${qty(mo.rejected_qty)} rejected` : undefined} />
@@ -417,8 +417,8 @@ function Quality() {
           <table className="table mt-3"><thead><tr><th>Parameter</th><th>Type</th><th>Min</th><th>Max</th><th /></tr></thead>
             <tbody>{rule.parameters.map((p: any, i: number) => {
               const upd = (x: any) => setRule({ ...rule, parameters: rule.parameters.map((q: any, j: number) => (j === i ? { ...q, ...x } : q)) });
-              return <tr key={i}><td><Input value={p.name} onChange={(e) => upd({ name: e.target.value })} /></td><td><Select value={p.type} onChange={(e) => upd({ type: e.target.value })} options={[{ value: 'pass_fail', label: 'Pass / fail' }, { value: 'numeric', label: 'Numeric range' }]} /></td>
-                <td>{p.type === 'numeric' && <Input type="number" value={p.min ?? ''} onChange={(e) => upd({ min: e.target.value })} />}</td><td>{p.type === 'numeric' && <Input type="number" value={p.max ?? ''} onChange={(e) => upd({ max: e.target.value })} />}</td>
+              return <tr key={i}><td><Input aria-label="Parameter name" value={p.name} onChange={(e) => upd({ name: e.target.value })} /></td><td><Select aria-label="Parameter type" value={p.type} onChange={(e) => upd({ type: e.target.value })} options={[{ value: 'pass_fail', label: 'Pass / fail' }, { value: 'numeric', label: 'Numeric range' }]} /></td>
+                <td>{p.type === 'numeric' && <Input aria-label="Minimum" type="number" value={p.min ?? ''} onChange={(e) => upd({ min: e.target.value })} />}</td><td>{p.type === 'numeric' && <Input aria-label="Maximum" type="number" value={p.max ?? ''} onChange={(e) => upd({ max: e.target.value })} />}</td>
                 <td><button className="btn btn-ghost btn-sm" onClick={() => setRule({ ...rule, parameters: rule.parameters.filter((_: any, j: number) => j !== i) })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></button></td></tr>;
             })}</tbody></table>
           <button className="btn btn-sm mt-2" onClick={() => setRule({ ...rule, parameters: [...rule.parameters, { name: '', type: 'pass_fail' }] })}><Plus className="h-3.5 w-3.5" />Add parameter</button>

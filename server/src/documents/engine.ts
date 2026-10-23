@@ -4,7 +4,7 @@ import { db, fail, json, type Row } from '../db.js';
 import { assertNotReconciled, journalsFor } from '../ledger.js';
 import { assertUnlocked, getKv, nextNumber, org } from '../settings.js';
 import { computeTaxLine, computeTds, supplyKind } from '../tax.js';
-import { addDays, isDate, r2, today, num, STATES } from '../util.js';
+import { addDays, amountInWords, isDate, r2, today, num, STATES } from '../util.js';
 import { buildMoves, isPosted, loadFull, syncPosting, type FullDoc } from './posting.js';
 import { DOC_TYPES, docType, type DocTypeDef } from './types.js';
 
@@ -57,12 +57,20 @@ export const approvalConfig = (type: string): { mode: 'none' | 'simple' | 'multi
 export const primaryWarehouse = () =>
   db().value<number>('SELECT id FROM warehouses WHERE is_active = 1 ORDER BY is_primary DESC, id LIMIT 1');
 
-/** Quantity of a parent line already consumed by child documents of the given type(s). */
-export function consumedQty(parentLineId: number, childTypes: string[], excludeDocId?: number, statuses?: string[]): number {
+/**
+ * Quantity of a parent line already consumed by child documents of the given type(s).
+ * Receives count only the accepted quantity (rejected goods can be received again), and vendor-credit lines that are
+ * price corrections (return_to_stock = false) do not use up the billed quantity. With `priceCorrections`, only those
+ * price-correction lines are counted instead (they have their own limit: the billed quantity).
+ */
+export function consumedQty(parentLineId: number, childTypes: string[], excludeDocId?: number, statuses?: string[], priceCorrections = false): number {
   const st = statuses ?? [];
+  const correction = "d.type = 'vendor_credit' AND json_extract(l.data, '$.return_to_stock') = 0";
   return db().value<number>(
-    `SELECT COALESCE(SUM(l.qty), 0) FROM document_lines l JOIN documents d ON d.id = l.document_id
+    `SELECT COALESCE(SUM(CASE WHEN d.type = 'purchase_receive' THEN COALESCE(l.qty2, l.qty) ELSE l.qty END), 0)
+     FROM document_lines l JOIN documents d ON d.id = l.document_id
      WHERE l.ref_line_id = ? AND d.type IN (${childTypes.map(() => '?').join(',')}) AND d.status NOT IN ('void','returned')
+       AND ${priceCorrections ? correction : `NOT (${correction})`}
        AND (? IS NULL OR d.id <> ?) ${st.length ? `AND d.status IN (${st.map(() => '?').join(',')})` : ''}`,
     parentLineId, ...childTypes, excludeDocId ?? null, excludeDocId ?? null, ...st) ?? 0;
 }
@@ -182,6 +190,14 @@ export function prepare(type: string, input: DocInput, existing?: Row) {
   if (type === 'stock_count' || type === 'inventory_adjustment' || type === 'transfer_order' || type === 'package' || type === 'purchase_receive') {
     for (const l of lines) if (!l.item_id) fail(`${def.plural} need an item on every line`, 422);
   }
+  if (type === 'purchase_receive') {
+    for (const l of lines) {
+      if (l.qty2 == null) continue;
+      const accepted = Number(l.qty2);
+      if (!Number.isFinite(accepted) || accepted < 0 || accepted > l.qty + 1e-9) fail(`Line ${l.line_no}: accepted quantity must be between 0 and ${l.qty}`, 422);
+      l.qty2 = accepted;
+    }
+  }
   if (type === 'inventory_adjustment' && data.mode === 'value') {
     for (const l of lines) {
       if (l.qty2 == null || !Number.isFinite(Number(l.qty2)) || Number(l.qty2) < 0) fail(`Line ${l.line_no}: enter the new stock value`, 422);
@@ -250,6 +266,12 @@ function validateRefs(type: string, header: Row, lines: Row[], docId?: number) {
     if (!pl || pl.document_id !== parent!.id) fail(`Line ${l.line_no} does not belong to ${parent!.number}`, 422);
     if (pl!.item_id && l.item_id && pl!.item_id !== l.item_id) fail(`Line ${l.line_no}: item differs from the source line`, 422);
     if (!consumers) continue;
+    if (type === 'vendor_credit' && json<Row>(l.data, {}).return_to_stock === false) {
+      // Price corrections do not use up the billed quantity, but together they cannot cover more units than were billed.
+      const corrected = consumedQty(pl!.id, ['vendor_credit'], docId, undefined, true);
+      if (l.qty > r2(pl!.qty - corrected) + 1e-9) fail(`Line ${l.line_no}: price corrections can cover at most ${r2(pl!.qty - corrected)} more unit(s) of ${parent!.number}`, 422);
+      continue;
+    }
     let limit = pl!.qty;
     if (type === 'sales_return' && parent!.type === 'sales_order') {
       limit = consumedQty(pl!.id, ['package'], undefined, ['shipped', 'delivered']) + consumedQty(pl!.id, ['delivery_challan']);
@@ -260,6 +282,15 @@ function validateRefs(type: string, header: Row, lines: Row[], docId?: number) {
       fail(`Line ${l.line_no}: quantity ${l.qty} exceeds the remaining ${r2(limit - used)} on ${parent!.number}`, 422);
     }
   }
+}
+
+/** A vendor's bill number can only be recorded once per vendor (prevents paying the same bill twice). */
+function assertUniqueVendorReference(type: string, header: Row, docId?: number) {
+  if (type !== 'bill' || !header.reference || !header.contact_id) return;
+  const dupe = db().get<Row>(
+    "SELECT number FROM documents WHERE type = 'bill' AND contact_id = ? AND reference = ? COLLATE NOCASE AND status <> 'void' AND id <> ?",
+    header.contact_id, header.reference, docId ?? -1);
+  if (dupe) fail(`Bill ${dupe.number} already records vendor bill number ${header.reference} for this vendor`, 409);
 }
 
 function writeLines(docId: number, lines: Row[], isUpdate: boolean) {
@@ -308,6 +339,7 @@ export function createDocument(type: string, input: DocInput, user: AuthUser | u
     const { header, lines } = prepare(type, input);
     assertUnlocked(def.lock, header.date, def.label);
     validateRefs(type, header, lines);
+    assertUniqueVendorReference(type, header);
     const status = initialStatus(def, !!opts.submit, lines);
     const number = nextNumber(type);
     const id = db().insert('documents', {
@@ -330,11 +362,12 @@ export function updateDocument(id: number, input: DocInput, user: AuthUser | und
     }
     const ed = json<Row>(existing.data, {});
     if (ed.einvoice?.status === 'generated') fail('Cancel the e-invoice (IRN) before editing this document', 422);
-    assertNotReconciled(existing.type, id);
+    assertNotReconciled(existing.type, id, 'edit');
     assertUnlocked(def.lock, existing.date, def.label);
     const { header, lines } = prepare(existing.type, input, existing);
     assertUnlocked(def.lock, header.date, def.label);
     validateRefs(existing.type, header, lines, id);
+    assertUniqueVendorReference(existing.type, header, id);
     let status = existing.status;
     if (existing.status === 'draft' && opts.submit) status = initialStatus(def, true, lines);
     if (existing.status === 'pending_approval') status = 'pending_approval';
@@ -429,8 +462,9 @@ export function refreshParent(parentId: number) {
     else if (p.status === 'closed' && !json<Row>(p.data, {}).manually_closed && (received < 1 - 1e-9 || billed < 1 - 1e-9)) status = 'issued';
     d.update('documents', parentId, { fulfil_status, billing_status, status });
   } else {
-    const children = d.all<Row>("SELECT type, status FROM documents WHERE ref_doc_id = ? AND status NOT IN ('void')", parentId);
-    const has = (t: string) => children.some((c) => c.type === t);
+    const children = d.all<Row>("SELECT type, status FROM documents WHERE ref_doc_id = ? AND status NOT IN ('void','rejected','cancelled')", parentId);
+    // postedOnly: the child must be in a posted status (drafts and pending approvals do not count).
+    const has = (t: string, postedOnly = false) => children.some((c) => c.type === t && (!postedOnly || DOC_TYPES[t].posted.includes(c.status)));
     let status = p.status;
     if (p.type === 'quote') {
       if (has('invoice')) status = 'invoiced';
@@ -439,9 +473,9 @@ export function refreshParent(parentId: number) {
     else if (p.type === 'rfq' && has('purchase_order')) status = 'ordered';
     else if (p.type === 'delivery_challan' && has('invoice')) status = 'invoiced';
     // A return only counts as credited once the goods are physically back.
-    else if (p.type === 'sales_return' && has('credit_note') && p.status === 'received') status = 'credited';
-    else if (p.type === 'sales_return' && !has('credit_note') && p.status === 'credited') status = 'received';
-    else if (p.type === 'stock_count' && has('inventory_adjustment')) status = 'completed';
+    else if (p.type === 'sales_return' && has('credit_note', true) && p.status === 'received') status = 'credited';
+    else if (p.type === 'sales_return' && !has('credit_note', true) && p.status === 'credited') status = 'received';
+    else if (p.type === 'stock_count' && has('inventory_adjustment', true)) status = 'completed';
     if (status !== p.status) d.update('documents', parentId, { status });
   }
 }
@@ -501,7 +535,7 @@ export function listDocuments(type: string, q: Row) {
   }
   if (q.ref_doc_id) { where.push('d.ref_doc_id = ?'); params.push(q.ref_doc_id); }
   const limit = Math.min(Number(q.limit) || 200, 1000);
-  const offset = Number(q.offset) || 0;
+  const offset = Math.max(0, Number(q.offset) || 0);
   const sortCol = ({ number: 'd.number', total: 'd.total', contact: 'c.name', due_date: 'd.due_date' } as Row)[q.sort] ?? 'd.date';
   const dir = q.dir === 'asc' ? 'ASC' : 'DESC';
   const rows = db().all<Row>(
@@ -566,6 +600,7 @@ export function getDocument(id: number, user?: AuthUser) {
     history: history(doc.type, id),
     comments: d.all<Row>('SELECT c.*, u.name AS user_name FROM comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.entity = ? AND c.entity_id = ? ORDER BY c.id', doc.type, id),
     can_approve: canApprove(doc, user),
+    amount_in_words: def.priced || doc.type === 'retainer_invoice' ? amountInWords(doc.total, doc.currency_code) : null,
     org: org(),
   };
   return out;
@@ -583,8 +618,9 @@ export function deleteDocument(id: number, user?: AuthUser) {
     if (paidAmount(id) > 0 || creditUsed(id) > 0) fail('Remove payments, applied credits and refunds before deleting', 422);
     if (json<Row>(doc.data, {}).einvoice?.status === 'generated') fail('Cancel the e-invoice before deleting', 422);
     if (db().get("SELECT 1 FROM manufacturing_orders WHERE sales_order_id = ? AND status <> 'cancelled'", id)) fail('Cancel linked manufacturing orders first', 422);
-    assertNotReconciled(doc.type, id);
+    assertNotReconciled(doc.type, id, 'delete');
     db().run("DELETE FROM credit_applications WHERE credit_doc_id = ? OR document_id = ?", id, id);
+    if (doc.type === 'purchase_receive') db().run("DELETE FROM quality_inspections WHERE source_type = 'purchase_receive' AND source_id = ?", id);
     db().update('documents', id, { status: 'void' });
     syncPosting(id); // removes stock moves and journals
     db().run('DELETE FROM documents WHERE id = ?', id);
@@ -601,9 +637,14 @@ export function voidDocument(id: number, user?: AuthUser, reason?: string) {
     if (doc.status === 'void') fail('Already void', 422);
     assertUnlocked(def.lock, doc.date, def.label);
     if (paidAmount(id) > 0 || creditUsed(id) > 0) fail('Remove payments, applied credits and refunds before voiding', 422);
-    const kids = db().value<number>("SELECT COUNT(*) FROM documents WHERE ref_doc_id = ? AND status <> 'void'", id);
-    if (kids) fail('Void or delete the linked transactions first', 422);
-    assertNotReconciled(doc.type, id);
+    const kids = db().all<Row>("SELECT type, number FROM documents WHERE ref_doc_id = ? AND status <> 'void'", id);
+    if (kids.length) {
+      const list = kids.slice(0, 5).map((k) => k.number).join(', ');
+      fail(doc.type === 'sales_order'
+        ? `This sales order has linked transactions (${list}). Close the order instead, or delete/void them first.`
+        : `Void or delete the linked transactions first (${list})`, 422);
+    }
+    assertNotReconciled(doc.type, id, 'void');
     if (json<Row>(doc.data, {}).einvoice?.status === 'generated') fail('Cancel the e-invoice (IRN) before voiding', 422);
     const data = { ...json<Row>(doc.data, {}), void_reason: reason ?? null };
     db().update('documents', id, { status: 'void', balance: 0, data: JSON.stringify(data) });
@@ -672,7 +713,7 @@ export function rejectDocument(id: number, user: AuthUser | undefined, comment?:
 // ---------------- Conversions ----------------
 
 /** Builds an unsaved draft of `toType` prefilled from a source document (only remaining quantities). */
-export function convertDraft(fromId: number, toType: string, opts: Row = {}): DocInput & { type: string } {
+export function convertDraft(fromId: number, toType: string, opts: Row = {}): DocInput & { type: string; ref_doc: Row } {
   const d = db();
   const src = loadFull(fromId) ?? fail('Source document not found', 404);
   const def = docType(toType);
@@ -747,9 +788,11 @@ export function convertDraft(fromId: number, toType: string, opts: Row = {}): Do
     currency_code: src.currency_code,
     exchange_rate: src.exchange_rate,
     place_of_supply: sameParty ? src.place_of_supply : undefined,
-    reference: src.number,
+    // On a bill the reference is the vendor's own invoice number (used for duplicate checks and GSTR-2B matching).
+    reference: toType === 'bill' ? null : src.number,
     salesperson: src.salesperson,
     ref_doc_id: refDocId,
+    ref_doc: refDocId === src.id ? { id: src.id, type: src.type, number: src.number } : d.get<Row>('SELECT id, type, number FROM documents WHERE id = ?', refDocId)!,
     reverse_charge: !!src.reverse_charge,
     tax_inclusive: !!src.tax_inclusive,
     notes: src.notes,

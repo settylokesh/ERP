@@ -41,9 +41,9 @@ export const qs = (o: Record<string, unknown>) => {
   return s ? `?${s}` : '';
 };
 
-/** Downloads a file (CSV/JSON) with the session token in the header, never in the URL. */
-export async function download(path: string, fallbackName = 'export') {
-  const res = await api<Response>(path, { raw: true });
+/** Downloads a file (CSV/JSON/backup) with the session token in the header, never in the URL. A body makes it a POST. */
+export async function download(path: string, fallbackName = 'export', body?: unknown) {
+  const res = await api<Response>(path, body === undefined ? { raw: true } : { raw: true, method: 'POST', body });
   const cd = res.headers.get('content-disposition') ?? '';
   const name = /filename="?([^"]+)"?/.exec(cd)?.[1] ?? fallbackName;
   const url = URL.createObjectURL(await res.blob());
@@ -54,4 +54,5 @@ export async function download(path: string, fallbackName = 'export') {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
 }

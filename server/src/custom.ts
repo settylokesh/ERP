@@ -1,6 +1,8 @@
 import { audit, runWorkflows } from './activity.js';
 import type { AuthUser } from './auth.js';
 import { db, fail, json, type Row } from './db.js';
+import { nextNumber } from './settings.js';
+import { isEmail } from './util.js';
 
 const FIELD_TYPES = ['text', 'textarea', 'number', 'decimal', 'currency', 'date', 'checkbox', 'dropdown', 'email', 'phone', 'url', 'lookup_customer', 'lookup_vendor', 'lookup_item'];
 
@@ -26,6 +28,8 @@ export function saveCustomModule(input: Row, user?: AuthUser, id?: number) {
   validateFields(input.fields);
   const row = { key, name: String(input.name ?? '').trim() || fail('Module name is required', 422), plural: String(input.plural ?? input.name).trim(), prefix: String(input.prefix ?? 'REC-'), fields: JSON.stringify(input.fields) };
   const mid = id ? (d.update('custom_modules', id, row), id) : d.insert('custom_modules', row);
+  // Record numbers come from a numbering series per module; keep its prefix in step with the module.
+  d.run('UPDATE sequences SET prefix = ? WHERE type = ?', row.prefix, `custom:${key}`);
   audit('custom_module', mid, id ? 'updated' : 'created', `Custom module ${row.name}`, user);
   return mid;
 }
@@ -53,7 +57,7 @@ function cleanRecord(fields: Row[], data: Row) {
         break;
       case 'checkbox': v = !!v; break;
       case 'date': if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v))) fail(`${f.label} must be a date`, 422); break;
-      case 'email': if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v))) fail(`${f.label} must be an email address`, 422); break;
+      case 'email': if (!isEmail(String(v))) fail(`${f.label} must be an email address`, 422); break;
       case 'dropdown': if (!f.options.includes(v)) fail(`${f.label} must be one of ${f.options.join(', ')}`, 422); break;
       case 'lookup_customer': case 'lookup_vendor':
         if (!db().get('SELECT 1 FROM contacts WHERE id = ? AND kind = ?', v, f.type === 'lookup_customer' ? 'customer' : 'vendor')) fail(`${f.label} not found`, 422);
@@ -76,8 +80,7 @@ export function saveCustomRecord(key: string, data: Row, user?: AuthUser, id?: n
     d.get('SELECT 1 FROM custom_records WHERE id = ? AND module_id = ?', id, m.id) ?? fail('Record not found', 404);
     d.update('custom_records', id, { data: JSON.stringify(clean), updated_at: new Date().toISOString() });
   } else {
-    const n = (d.value<number>('SELECT COUNT(*) FROM custom_records WHERE module_id = ?', m.id) ?? 0) + 1;
-    rid = d.insert('custom_records', { module_id: m.id, number: `${m.prefix}${String(n).padStart(5, '0')}`, data: JSON.stringify(clean), created_by: user?.id ?? null });
+    rid = d.insert('custom_records', { module_id: m.id, number: nextNumber(`custom:${key}`, m.prefix), data: JSON.stringify(clean), created_by: user?.id ?? null });
   }
   runWorkflows(`custom:${key}`, id ? 'on_update' : 'on_create', { id: rid, ...clean, custom: '{}' }, user, 'custom_records');
   audit(`custom:${key}`, rid!, id ? 'updated' : 'created', `${m.name} record saved`, user);

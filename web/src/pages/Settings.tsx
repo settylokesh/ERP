@@ -1,10 +1,10 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
-import { del, get, post, put } from '../api';
+import { del, download, get, post, put } from '../api';
 import { DataTable } from '../components/DataTable';
 import { StateSelect } from '../components/pickers';
-import { Badge, Check, Field, Input, Modal, PageHeader, Select, Spinner, Textarea, useAction } from '../components/ui';
+import { Badge, Check, ErrorBox, Field, Input, KeyVal, Modal, PageHeader, Select, Spinner, Textarea, useAction } from '../components/ui';
 import { dateTime, money, titleCase } from '../lib/format';
 import { useApi, useMeta } from '../lib/hooks';
 
@@ -39,7 +39,7 @@ function Org() {
         <Field label="B2C Large threshold (₹)" hint="Inter-state B2C invoices above this go to GSTR-1 Table 5"><Input type="number" value={f.b2cl_threshold} onChange={(e) => set({ b2cl_threshold: Number(e.target.value) })} /></Field>
         <div className="space-y-2 pt-5">
           <Check label="Prevent stock from going negative" checked={!!f.prevent_negative_stock} onChange={(v) => set({ prevent_negative_stock: v })} />
-          <Check label="Enable e-invoicing (IRP)" checked={!!f.einvoice_enabled} onChange={(v) => set({ einvoice_enabled: v })} />
+          <Check label="My business must issue e-invoices (IRN)" checked={!!f.einvoice_enabled} onChange={(v) => set({ einvoice_enabled: v })} />
         </div>
         <Field label="Default invoice terms" className="sm:col-span-2 lg:col-span-3"><Textarea value={f.invoice_terms} onChange={(e) => set({ invoice_terms: e.target.value })} /></Field>
         <Field label="Default customer notes" className="sm:col-span-2 lg:col-span-3"><Textarea value={f.invoice_notes} onChange={(e) => set({ invoice_notes: e.target.value })} /></Field>
@@ -49,15 +49,19 @@ function Org() {
   );
 }
 
+const AdminNote = () => <p className="rounded-md bg-slate-50 p-2 text-xs text-slate-600">Only administrators can add users, change roles or reset passwords.</p>;
+
 function Users() {
+  const { meta } = useMeta();
+  const admin = meta.user.is_admin;
   const { data, reload } = useApi<any[]>('/settings/users');
   const { data: roles } = useApi<any[]>('/settings/roles');
   const [edit, setEdit] = useState<any>(null);
   const { run, busy } = useAction();
   return (
     <div className="space-y-3">
-      <button className="btn btn-primary" onClick={() => setEdit({ is_active: true })}><Plus className="h-4 w-4" />Invite user</button>
-      <DataTable rows={data ?? []} onRow={(r) => setEdit({ ...r, is_active: !!r.is_active })} cols={[{ key: 'name', label: 'Name', render: (r) => <span className="link">{r.name}</span> }, { key: 'email', label: 'Email' }, { key: 'role_name', label: 'Role' }, { key: 'is_active', label: 'Status', render: (r) => <Badge status={r.is_active ? 'active' : 'inactive'} /> }]} />
+      {admin ? <button className="btn btn-primary" onClick={() => setEdit({ is_active: true })}><Plus className="h-4 w-4" />Add user</button> : <AdminNote />}
+      <DataTable rows={data ?? []} onRow={admin ? (r) => setEdit({ ...r, is_active: !!r.is_active }) : undefined} cols={[{ key: 'name', label: 'Name', render: (r) => <span className={admin ? 'link' : ''}>{r.name}</span> }, { key: 'email', label: 'Email' }, { key: 'role_name', label: 'Role' }, { key: 'last_login_at', label: 'Last sign-in', render: (r) => (r.last_login_at ? dateTime(r.last_login_at) : 'Never') }, { key: 'is_active', label: 'Status', render: (r) => <Badge status={r.is_active ? 'active' : 'inactive'} /> }]} />
       {edit && (
         <Modal title={edit.id ? `Edit ${edit.name}` : 'New user'} onClose={() => setEdit(null)} footer={<button className="btn btn-primary" disabled={busy} onClick={async () => { if (await run(() => (edit.id ? put(`/settings/users/${edit.id}`, edit) : post('/settings/users', edit)), 'User saved')) { setEdit(null); reload(); } }}>Save</button>}>
           <div className="grid gap-3">
@@ -76,13 +80,15 @@ function Users() {
 const MODS = ['items', 'sales', 'purchases', 'inventory', 'manufacturing', 'accountant', 'banking', 'assets', 'payroll', 'compliance', 'reports', 'settings', 'custom'];
 const ACTS = ['view', 'create', 'edit', 'delete', 'approve'];
 function Roles() {
+  const { meta } = useMeta();
+  const admin = meta.user.is_admin;
   const { data, reload } = useApi<any[]>('/settings/roles');
   const [edit, setEdit] = useState<any>(null);
   const { run, busy } = useAction();
   return (
     <div className="space-y-3">
-      <button className="btn btn-primary" onClick={() => setEdit({ name: '', permissions: {} })}><Plus className="h-4 w-4" />New role</button>
-      <DataTable rows={data ?? []} onRow={(r) => !r.is_admin && setEdit(r)} cols={[{ key: 'name', label: 'Role', render: (r) => <span className={r.is_admin ? '' : 'link'}>{r.name}</span> }, { key: 'description', label: 'Description' }, { key: 'users', label: 'Users', num: true }]} />
+      {admin ? <button className="btn btn-primary" onClick={() => setEdit({ name: '', permissions: {} })}><Plus className="h-4 w-4" />New role</button> : <AdminNote />}
+      <DataTable rows={data ?? []} onRow={admin ? (r) => !r.is_admin && setEdit(r) : undefined} cols={[{ key: 'name', label: 'Role', render: (r) => <span className={r.is_admin || !admin ? '' : 'link'}>{r.name}</span> }, { key: 'description', label: 'Description' }, { key: 'users', label: 'Users', num: true }]} />
       {edit && (
         <Modal wide title={edit.id ? `Edit role ${edit.name}` : 'New role'} onClose={() => setEdit(null)} footer={<>
           {edit.id && <button className="btn btn-danger mr-auto" onClick={async () => { if (await run(() => del(`/settings/roles/${edit.id}`), 'Role deleted')) { setEdit(null); reload(); } }}>Delete</button>}
@@ -142,6 +148,7 @@ function Warehouses() {
           <Field label="Name"><Input value={w.name ?? ''} onChange={(e) => setW({ ...w, name: e.target.value })} /></Field><Field label="Code"><Input value={w.code ?? ''} onChange={(e) => setW({ ...w, code: e.target.value })} /></Field>
           <Field label="State"><StateSelect value={w.state_code} onChange={(v) => setW({ ...w, state_code: v })} /></Field><Field label="GSTIN (if separately registered)"><Input value={w.gstin ?? ''} onChange={(e) => setW({ ...w, gstin: e.target.value.toUpperCase() })} /></Field>
           <Field label="Address" className="sm:col-span-2"><Textarea value={w.address ?? ''} onChange={(e) => setW({ ...w, address: e.target.value })} /></Field>
+          <Field label="City"><Input value={w.city ?? ''} onChange={(e) => setW({ ...w, city: e.target.value })} /></Field><Field label="PIN code" hint="Used as the dispatch address on e-way bills"><Input value={w.pincode ?? ''} onChange={(e) => setW({ ...w, pincode: e.target.value })} /></Field>
           <Check label="Primary" checked={!!w.is_primary} onChange={(v) => setW({ ...w, is_primary: v })} /><Check label="Active" checked={w.is_active} onChange={(v) => setW({ ...w, is_active: v })} />
         </div></Modal>}
       {c && <Modal title="Currency" onClose={() => setC(null)} footer={<button className="btn btn-primary" disabled={busy} onClick={async () => { if (await run(() => post('/currencies', c), 'Saved')) { setC(null); reloadCur(); reloadMeta(); } }}>Save</button>}>
@@ -165,7 +172,7 @@ function Approvals() {
           return (
             <div key={t.type} className="flex flex-wrap items-center gap-3 p-3">
               <div className="w-48 font-medium">{t.plural}</div>
-              <Select className="w-48" value={c.mode} onChange={(e) => setCfg({ ...cfg, [t.type]: { ...c, mode: e.target.value } })} options={[{ value: 'none', label: 'No approval' }, { value: 'simple', label: 'Simple approval' }, { value: 'multi', label: 'Multi-level approval' }]} />
+              <Select aria-label={`${t.label} approval`} className="w-48" value={c.mode} onChange={(e) => setCfg({ ...cfg, [t.type]: { ...c, mode: e.target.value } })} options={[{ value: 'none', label: 'No approval' }, { value: 'simple', label: 'Simple approval' }, { value: 'multi', label: 'Multi-level approval' }]} />
               {c.mode === 'multi' && (
                 <div className="flex flex-wrap items-center gap-2">
                   {c.levels.map((l: number, i: number) => <span key={i} className="chip bg-slate-100">L{i + 1}: {roles?.find((r) => r.id === l)?.name}<button className="ml-1" onClick={() => setCfg({ ...cfg, [t.type]: { ...c, levels: c.levels.filter((_: any, j: number) => j !== i) } })} aria-label="Remove level">×</button></span>)}
@@ -213,7 +220,7 @@ function Workflows() {
             const upd = (p: any) => setEdit({ ...edit, actions: edit.actions.map((x: any, j: number) => (j === i ? { ...x, ...p } : x)) });
             return (
               <div key={i} className="mb-2 grid gap-2 rounded border border-slate-200 p-2 sm:grid-cols-4">
-                <Select value={a.type} onChange={(e) => upd({ type: e.target.value })} options={[{ value: 'notify', label: 'In-app notification' }, { value: 'email', label: 'Email alert' }, { value: 'field_update', label: 'Field update' }, { value: 'webhook', label: 'Webhook' }]} />
+                <Select aria-label="Action type" value={a.type} onChange={(e) => upd({ type: e.target.value })} options={[{ value: 'notify', label: 'In-app notification' }, { value: 'email', label: 'Email alert' }, { value: 'field_update', label: 'Field update' }, { value: 'webhook', label: 'Webhook' }]} />
                 {a.type === 'notify' && <><Input placeholder="to: admins | creator | role:ID | user:ID" value={a.to ?? ''} onChange={(e) => upd({ to: e.target.value })} /><Input placeholder="Title, e.g. Invoice ${number}" value={a.title ?? ''} onChange={(e) => upd({ title: e.target.value })} /><Input placeholder="Body" value={a.body ?? ''} onChange={(e) => upd({ body: e.target.value })} /></>}
                 {a.type === 'email' && <><Input placeholder="to: contact or an address" value={a.to ?? ''} onChange={(e) => upd({ to: e.target.value })} /><Input placeholder="Subject" value={a.subject ?? ''} onChange={(e) => upd({ subject: e.target.value })} /><Input placeholder="Body" value={a.body ?? ''} onChange={(e) => upd({ body: e.target.value })} /></>}
                 {a.type === 'field_update' && <><Input placeholder="field: reference | salesperson | notes | custom.x" value={a.field ?? ''} onChange={(e) => upd({ field: e.target.value })} /><Input placeholder="value" value={a.value ?? ''} onChange={(e) => upd({ value: e.target.value })} /></>}
@@ -282,7 +289,7 @@ function CustomModules() {
             <tbody>{edit.fields.map((f: any, i: number) => {
               const upd = (p: any) => setEdit({ ...edit, fields: edit.fields.map((x: any, j: number) => (j === i ? { ...x, ...p } : x)) });
               return <tr key={i}><td><Input value={f.label} onChange={(e) => upd({ label: e.target.value, key: f.key || e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '_') })} /></td><td><Input value={f.key} onChange={(e) => upd({ key: e.target.value })} /></td>
-                <td><Select value={f.type} onChange={(e) => upd({ type: e.target.value })} options={FIELD_TYPES.map((t) => ({ value: t, label: titleCase(t) }))} /></td>
+                <td><Select aria-label="Field type" value={f.type} onChange={(e) => upd({ type: e.target.value })} options={FIELD_TYPES.map((t) => ({ value: t, label: titleCase(t) }))} /></td>
                 <td>{f.type === 'dropdown' && <Input value={(f.options ?? []).join(', ')} onChange={(e) => upd({ options: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} />}</td>
                 <td><input type="checkbox" checked={!!f.required} onChange={(e) => upd({ required: e.target.checked })} aria-label="Required" /></td>
                 <td><button className="btn btn-ghost btn-sm" onClick={() => setEdit({ ...edit, fields: edit.fields.filter((_: any, j: number) => j !== i) })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></button></td></tr>;
@@ -382,11 +389,36 @@ function PayrollSettings() {
 }
 
 function Logs() {
-  const { data } = useApi<any[]>('/settings/email-log');
+  const { data, reload } = useApi<{ configured: boolean; rows: any[] }>('/settings/email-log');
+  const { run, busy } = useAction();
+  const unsent = (data?.rows ?? []).filter((r) => r.status !== 'sent').length;
   return (
     <div className="space-y-3">
-      <p className="text-xs text-slate-500">Emails are recorded in this outbox (no SMTP server is configured in this deployment). The full activity trail is in <Link to="/reports/audit_trail">Reports → Audit Trail</Link>.</p>
-      <DataTable rows={data ?? []} cols={[{ key: 'at', label: 'Time', render: (r) => dateTime(r.at) }, { key: 'to_addr', label: 'To' }, { key: 'subject', label: 'Subject' }, { key: 'entity', label: 'Module' }, { key: 'status', label: 'Status' }]} />
+      {data && !data.configured && <p className="rounded-md bg-amber-50 p-3 text-xs text-amber-800">Email delivery is not configured, so emails stay queued here. Set <code>SMTP_HOST</code>, <code>SMTP_PORT</code>, <code>SMTP_USER</code>, <code>SMTP_PASSWORD</code> and <code>SMTP_FROM</code> on the server to send them.</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-slate-500">Every email the system sends is listed here. The full activity trail is in <Link to="/reports/audit_trail">Reports → Audit Trail</Link>.</p>
+        {data?.configured && unsent > 0 && <button className="btn btn-sm" disabled={busy} onClick={async () => { if (await run(() => post('/settings/email-log/retry', {}), 'Sending again')) setTimeout(reload, 1500); }}>Retry unsent ({unsent})</button>}
+      </div>
+      <DataTable rows={data?.rows ?? []} cols={[{ key: 'at', label: 'Time', render: (r) => dateTime(r.at) }, { key: 'to_addr', label: 'To' }, { key: 'subject', label: 'Subject' }, { key: 'entity', label: 'Module' },
+        { key: 'status', label: 'Status', render: (r) => <span title={r.error ?? ''}><Badge status={r.status === 'sent' ? 'paid' : r.status === 'failed' ? 'overdue' : 'pending'} label={titleCase(r.status)} /></span> }]} />
+    </div>
+  );
+}
+
+function System() {
+  const { meta } = useMeta();
+  const { data, error } = useApi<any>(meta.user.is_admin ? '/admin/system' : null);
+  const { run, busy } = useAction();
+  if (!meta.user.is_admin) return <AdminNote />;
+  return (
+    <div className="space-y-4">
+      <ErrorBox error={error} />
+      <div className="card p-5">
+        <h3 className="mb-2">Backup</h3>
+        <p className="mb-3 text-xs text-slate-600">Downloads a consistent copy of the whole database (all transactions, users and settings) as a single SQLite file. Keep backups somewhere safe and off this server: they contain everything in the system.</p>
+        <button className="btn btn-primary" disabled={busy} onClick={() => run(() => download('/admin/backup', 'saral-backup.db'), 'Backup downloaded')}>Download backup</button>
+      </div>
+      {data && <div className="card p-5"><h3 className="mb-2">System</h3><KeyVal items={[['Database schema version', `${data.schema_version} (latest ${data.latest_schema_version})`], ['Node.js', data.node], ['Users', data.users], ['Transactions', data.documents], ['Journal entries', data.journals]]} /></div>}
     </div>
   );
 }
@@ -395,7 +427,7 @@ const SECTIONS: [string, string, () => JSX.Element][] = [
   ['', 'Organisation', Org], ['users', 'Users', Users], ['roles', 'Roles & Permissions', Roles], ['taxes', 'Taxes & TDS', Taxes],
   ['locations', 'Warehouses & Currencies', Warehouses], ['approvals', 'Approvals', Approvals], ['workflows', 'Workflow Rules', Workflows],
   ['custom-fields', 'Custom Fields', CustomFields], ['custom-modules', 'Custom Modules', CustomModules], ['numbering', 'Transaction Numbering', Sequences],
-  ['payroll', 'Payroll & Statutory', PayrollSettings], ['logs', 'Email Log', Logs],
+  ['payroll', 'Payroll & Statutory', PayrollSettings], ['logs', 'Email Log', Logs], ['system', 'System & Backup', System],
 ];
 
 export default function Settings() {

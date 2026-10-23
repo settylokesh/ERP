@@ -1,11 +1,13 @@
 import { Plus } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { qs } from '../../api';
 import { DataTable, type Col } from '../../components/DataTable';
 import { Badge, ErrorBox, Input, PageHeader, Spinner } from '../../components/ui';
 import { date, money } from '../../lib/format';
 import { useApi, useCan, useDebounced, useMeta } from '../../lib/hooks';
+
+const PAGE = 100;
 
 export default function DocList() {
   const { type = '' } = useParams();
@@ -19,7 +21,9 @@ export default function DocList() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const q = useDebounced(search);
-  const { data, error, loading } = useApi<{ rows: any[]; total: number }>(def ? `/docs/${type}${qs({ status, search: q, from, to })}` : null);
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [type, status, q, from, to]);
+  const { data, error, loading } = useApi<{ rows: any[]; total: number }>(def ? `/docs/${type}${qs({ status, search: q, from, to, limit: PAGE, offset: page * PAGE })}` : null);
   if (!def) return <div className="p-6"><ErrorBox error={`Unknown module ${type}`} /></div>;
   const statusTabs = [{ k: '', l: 'All' }, ...Object.entries(def.statuses).map(([k, l]) => ({ k, l: l as string })), ...(['invoice', 'bill'].includes(type) ? [{ k: 'overdue', l: 'Overdue' }, { k: 'unpaid', l: 'Unpaid' }] : [])];
   const cols: Col<any>[] = [
@@ -66,7 +70,11 @@ export default function DocList() {
         <ErrorBox error={error} />
         {loading && !data ? <Spinner /> : (
           <DataTable cols={cols} rows={data?.rows ?? []} onRow={(r) => nav(`/docs/${type}/${r.id}`)} exportName={def.plural.toLowerCase().replace(/\s+/g, '_')}
-            footer={data && data.total > data.rows.length ? <tr><td colSpan={cols.length} className="text-center text-xs text-slate-500">Showing {data.rows.length} of {data.total}. Narrow the search to see more.</td></tr> : undefined} />
+            footer={data && data.total > PAGE ? <tr><td colSpan={cols.length} className="text-center text-xs text-slate-600">
+              <span className="mr-3">{page * PAGE + 1}–{page * PAGE + data.rows.length} of {data.total}</span>
+              <button className="btn btn-sm mr-1" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button>
+              <button className="btn btn-sm" disabled={(page + 1) * PAGE >= data.total} onClick={() => setPage(page + 1)}>Next</button>
+            </td></tr> : undefined} />
         )}
       </div>
     </div>

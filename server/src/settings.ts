@@ -1,4 +1,5 @@
 import { db, fail, json } from './db.js';
+import { fiscalYear, isDate, isEmail, isPincode, PAN_RE, STATES, today, validateGstin } from './util.js';
 
 export interface OrgSettings {
   name: string;
@@ -26,9 +27,10 @@ export interface OrgSettings {
   setup_complete: boolean;
 }
 
+/** Organisation profile. Name, GSTIN, state and the opening date are captured by the first-run setup. */
 export const DEFAULT_ORG: OrgSettings = {
-  name: 'My Company',
-  legal_name: 'My Company Private Limited',
+  name: '',
+  legal_name: '',
   gstin: '',
   state_code: '29',
   address: '',
@@ -38,18 +40,18 @@ export const DEFAULT_ORG: OrgSettings = {
   phone: '',
   pan: '',
   website: '',
-  industry: 'Manufacturing',
+  industry: '',
   base_currency: 'INR',
   fiscal_year_start_month: 4,
-  inventory_start_date: '2026-04-01',
+  inventory_start_date: '',
   valuation_method: 'fifo',
   prevent_negative_stock: true,
-  einvoice_enabled: true,
+  einvoice_enabled: false,
   eway_threshold: 50000,
   // Since 1 Aug 2024 inter-state B2C invoices above Rs 1 lakh are reported as B2CL in GSTR-1.
   b2cl_threshold: 100000,
-  invoice_terms: 'Goods once sold will not be taken back. Interest @18% p.a. will be charged on overdue invoices.',
-  invoice_notes: 'Thank you for your business.',
+  invoice_terms: '',
+  invoice_notes: '',
   setup_complete: false,
 };
 
@@ -115,6 +117,47 @@ export function setKv(key: string, value: unknown) {
 }
 
 export const org = () => getKv<OrgSettings>('org', DEFAULT_ORG);
+
+/**
+ * Validates and normalises an organisation profile. Used by first-run setup and by Settings > Organisation so both
+ * apply exactly the same rules. Returns the cleaned profile (unknown keys dropped).
+ */
+export function validateOrgProfile(input: Partial<OrgSettings>): OrgSettings {
+  const o: OrgSettings = { ...DEFAULT_ORG, ...input } as OrgSettings;
+  for (const k of Object.keys(o)) if (!(k in DEFAULT_ORG)) delete (o as unknown as Record<string, unknown>)[k];
+  for (const k of ['name', 'legal_name', 'gstin', 'pan', 'address', 'city', 'pincode', 'email', 'phone', 'website', 'industry'] as const) {
+    o[k] = String(o[k] ?? '').trim();
+  }
+  if (!o.name) fail('Organisation name is required', 422);
+  o.legal_name ||= o.name;
+  if (!STATES[o.state_code] || ['96', '97'].includes(o.state_code)) fail('Choose the state where the organisation is registered', 422);
+  o.gstin = o.gstin.toUpperCase();
+  if (o.gstin) {
+    const err = validateGstin(o.gstin);
+    if (err) fail(err, 422);
+    if (o.gstin.slice(0, 2) !== o.state_code) fail('GSTIN state code does not match the organisation state', 422);
+  }
+  o.pan = o.pan.toUpperCase() || (o.gstin ? o.gstin.slice(2, 12) : '');
+  if (o.pan && !PAN_RE.test(o.pan)) fail('PAN format is invalid', 422);
+  if (o.pincode && !isPincode(o.pincode)) fail('PIN code must be 6 digits', 422);
+  if (o.email && !isEmail(o.email)) fail('Organisation email is invalid', 422);
+  o.fiscal_year_start_month = Number(o.fiscal_year_start_month);
+  if (!(Number.isInteger(o.fiscal_year_start_month) && o.fiscal_year_start_month >= 1 && o.fiscal_year_start_month <= 12)) fail('Fiscal year start month must be 1-12', 422);
+  if (!isDate(o.inventory_start_date)) fail('Opening balance date is required (YYYY-MM-DD)', 422);
+  if (!['fifo', 'wac'].includes(o.valuation_method)) fail('Invalid valuation method', 422);
+  for (const k of ['eway_threshold', 'b2cl_threshold'] as const) {
+    o[k] = Number(o[k]);
+    if (!(o[k] >= 0)) fail(`${k.replace('_', ' ')} must be zero or more`, 422);
+  }
+  o.prevent_negative_stock = !!o.prevent_negative_stock;
+  o.einvoice_enabled = !!o.einvoice_enabled;
+  return o;
+}
+/** Date on which opening stock and opening balances are recorded: the configured date, else the current fiscal year start. */
+export const openingDate = () => {
+  const o = org();
+  return o.inventory_start_date || fiscalYear(today(), o.fiscal_year_start_month).start;
+};
 export const payrollSettings = (): PayrollSettings => {
   const v = getKv<PayrollSettings>('payroll', DEFAULT_PAYROLL);
   return { ...DEFAULT_PAYROLL, ...v, pf: { ...DEFAULT_PAYROLL.pf, ...v.pf }, esi: { ...DEFAULT_PAYROLL.esi, ...v.esi }, tds: { ...DEFAULT_PAYROLL.tds, ...v.tds } };
@@ -136,15 +179,37 @@ export const DEFAULT_SEQUENCES: Record<string, string> = {
   bank_txn: 'BT-', refund: 'RF-',
 };
 
-export function nextNumber(type: string): string {
+/** Where each numbering series is stored, so a generated number can be checked against existing records. */
+function numberTaken(type: string, number: string): boolean {
+  const d = db();
+  const table: Record<string, [string, string?]> = {
+    payment_received: ['payments', "kind = 'received'"], payment_made: ['payments', "kind = 'made'"], journal: ['journals'],
+    bom: ['boms'], manufacturing_order: ['manufacturing_orders'], job_card: ['job_cards'], inspection: ['quality_inspections'],
+    asset: ['assets'], pay_run: ['pay_runs'], bank_txn: ['bank_transactions'],
+  };
+  if (type.startsWith('custom:')) return !!d.get('SELECT 1 FROM custom_records r JOIN custom_modules m ON m.id = r.module_id WHERE m.key = ? AND r.number = ?', type.slice(7), number);
+  const t = table[type];
+  if (t) return !!d.get(`SELECT 1 FROM ${t[0]} WHERE number = ? ${t[1] ? `AND ${t[1]}` : ''}`, number);
+  if (type === 'refund') return false;
+  return !!d.get('SELECT 1 FROM documents WHERE type = ? AND number = ?', type, number);
+}
+
+/**
+ * Next number in a series. If the counter was moved back (Settings > Numbering) onto numbers that are already used,
+ * it skips forward to the first free number instead of failing on the unique constraint.
+ */
+export function nextNumber(type: string, defaultPrefix?: string): string {
   const d = db();
   let row = d.get<{ prefix: string; next_no: number; padding: number }>('SELECT * FROM sequences WHERE type = ?', type);
   if (!row) {
-    d.insert('sequences', { type, prefix: DEFAULT_SEQUENCES[type] ?? `${type.toUpperCase().slice(0, 3)}-`, next_no: 1, padding: 5 });
+    d.insert('sequences', { type, prefix: defaultPrefix ?? DEFAULT_SEQUENCES[type] ?? `${type.toUpperCase().slice(0, 3)}-`, next_no: 1, padding: 5 });
     row = d.get('SELECT * FROM sequences WHERE type = ?', type)!;
   }
-  d.run('UPDATE sequences SET next_no = next_no + 1 WHERE type = ?', type);
-  return `${row.prefix}${String(row.next_no).padStart(row.padding, '0')}`;
+  let n = row.next_no;
+  const fmt = (x: number) => `${row!.prefix}${String(x).padStart(row!.padding, '0')}`;
+  for (let guard = 0; numberTaken(type, fmt(n)) && guard < 100000; guard++) n++;
+  d.run('UPDATE sequences SET next_no = ? WHERE type = ?', n + 1, type);
+  return fmt(n);
 }
 export function peekNumber(type: string): string {
   const row = db().get<{ prefix: string; next_no: number; padding: number }>('SELECT * FROM sequences WHERE type = ?', type);

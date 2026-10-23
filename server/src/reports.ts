@@ -2,7 +2,7 @@ import { db, fail, json, type Row } from './db.js';
 import { availableBatches, availableSerials, committedQty, stockSummary } from './inventory.js';
 import { ACCOUNT_TYPES, acct, categoryOf } from './ledger.js';
 import { org } from './settings.js';
-import { addDays, daysBetween, fiscalYear, r2, today } from './util.js';
+import { addDays, daysBetween, fiscalYear, isDate, r2, today } from './util.js';
 
 export interface Column { key: string; label: string; type?: 'text' | 'money' | 'number' | 'date' | 'percent'; link?: string }
 export interface ReportResult { title: string; subtitle?: string; columns: Column[]; rows: Row[]; totals?: Row; sections?: { title: string; rows: Row[]; total?: number }[]; meta?: Row }
@@ -319,7 +319,7 @@ export const REPORTS: Record<string, { category: string; title: string; fn: Repo
         `SELECT c.id AS contact_id, c.name AS customer,
            COALESCE((SELECT SUM(total) FROM documents WHERE contact_id = c.id AND type = 'invoice' AND status IN ('open','partially_paid','paid') AND date <= ?),0) AS invoiced,
            COALESCE((SELECT SUM(amount) FROM payments WHERE contact_id = c.id AND kind = 'received' AND status <> 'void' AND date <= ?),0) AS received,
-           COALESCE((SELECT SUM(jl.debit - jl.credit) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.contact_id = c.id AND jl.account_id = ? AND j.date <= ?),0) AS balance
+           COALESCE((SELECT SUM(jl.debit - jl.credit) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.contact_id = c.id AND jl.account_id = ? AND j.status = 'posted' AND j.date <= ?),0) AS balance
          FROM contacts c WHERE c.kind = 'customer' ORDER BY c.name`, asOf, asOf, ar, asOf).map((r) => ({ ...r, invoiced: r2(r.invoiced), received: r2(r.received), balance: r2(r.balance) })).filter((r) => r.invoiced || r.balance);
       return { title: 'Customer Balance Summary', subtitle: `As of ${asOf}`, columns: [{ key: 'customer', label: 'Customer', link: 'customers' }, money('invoiced', 'Invoiced Amount'), money('received', 'Amount Received'), money('balance', 'Closing Balance')], rows, totals: { invoiced: sumBy(rows, 'invoiced'), received: sumBy(rows, 'received'), balance: sumBy(rows, 'balance') } };
     },
@@ -351,7 +351,7 @@ export const REPORTS: Record<string, { category: string; title: string; fn: Repo
         `SELECT c.id AS contact_id, c.name AS vendor,
            COALESCE((SELECT SUM(total) FROM documents WHERE contact_id = c.id AND type = 'bill' AND status IN ('open','partially_paid','paid') AND date <= ?),0) AS billed,
            COALESCE((SELECT SUM(amount) FROM payments WHERE contact_id = c.id AND kind = 'made' AND status <> 'void' AND date <= ?),0) AS paid,
-           COALESCE((SELECT SUM(jl.credit - jl.debit) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.contact_id = c.id AND jl.account_id = ? AND j.date <= ?),0) AS balance
+           COALESCE((SELECT SUM(jl.credit - jl.debit) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.contact_id = c.id AND jl.account_id = ? AND j.status = 'posted' AND j.date <= ?),0) AS balance
          FROM contacts c WHERE c.kind = 'vendor' ORDER BY c.name`, asOf, asOf, ap, asOf).map((r) => ({ ...r, billed: r2(r.billed), paid: r2(r.paid), balance: r2(r.balance) })).filter((r) => r.billed || r.balance);
       return { title: 'Vendor Balance Summary', subtitle: `As of ${asOf}`, columns: [{ key: 'vendor', label: 'Vendor', link: 'vendors' }, money('billed', 'Billed Amount'), money('paid', 'Amount Paid'), money('balance', 'Closing Balance')], rows, totals: { billed: sumBy(rows, 'billed'), paid: sumBy(rows, 'paid'), balance: sumBy(rows, 'balance') } };
     },
@@ -398,7 +398,7 @@ export const REPORTS: Record<string, { category: string; title: string; fn: Repo
          WHERE i.type = 'goods' AND i.track_inventory = 1 GROUP BY i.id ORDER BY i.name`, asOf)
         .map((r) => ({ ...r, qty: r2(r.qty), value: r2(r.value), unit_cost: r.qty > 0 ? r2(r.value / r.qty) : 0 }));
       const ledger = r2(db().value<number>(
-        `SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type = 'stock' AND j.date <= ?`, asOf) ?? 0);
+        `SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type = 'stock' AND j.status = 'posted' AND j.date <= ?`, asOf) ?? 0);
       return {
         title: 'Inventory Valuation Summary', subtitle: `As of ${asOf} (${org().valuation_method.toUpperCase()}, accounting stock)`,
         columns: [{ key: 'name', label: 'Item', link: 'items' }, { key: 'sku', label: 'SKU' }, { key: 'qty', label: 'Stock On Hand', type: 'number' }, money('unit_cost', 'Average Cost'), money('value', 'Inventory Asset Value')],
@@ -594,6 +594,10 @@ export const REPORTS: Record<string, { category: string; title: string; fn: Repo
 
 export function runReport(key: string, q: Row): ReportResult {
   const r = REPORTS[key] ?? fail('Report not found', 404);
+  for (const p of ['from', 'to']) {
+    if (q[p] !== undefined && q[p] !== '' && !isDate(q[p])) fail(`'${p}' must be a date (YYYY-MM-DD)`, 422);
+  }
+  if (q.from && q.to && q.from > q.to) fail("'from' must be on or before 'to'", 422);
   return r.fn(q);
 }
 
@@ -608,7 +612,7 @@ export function toCsv(r: ReportResult): string {
     if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const lines: string[] = [r.title, r.subtitle ?? ''];
+  const lines: string[] = [esc(r.title), esc(r.subtitle ?? '')];
   if (r.sections) {
     lines.push('Account,Amount');
     for (const s of r.sections) {

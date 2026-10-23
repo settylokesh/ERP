@@ -267,20 +267,52 @@ export function sourceStockValue(sourceType: string, sourceId: number, filter: '
      GROUP BY m.item_id, m.source_line_id`, sourceType, sourceId);
 }
 
+/**
+ * Units received on a purchase line that are still in accounting stock on a date.
+ * FIFO: issues use up the oldest receipts first, so the line's units remain only once everything received before it
+ * has been consumed. Weighted average: stock is pooled, so the line keeps the same share as the pool that remains out
+ * of everything available since the line was received. Transfers between warehouses do not consume stock.
+ */
+export function unitsRemainingFromLine(itemId: number, sourceLineId: number, asOf: string, exclude: [string, number]): number {
+  const d = db();
+  const scope = `item_id = ? AND accounting = 1 AND kind <> 'transfer' AND date <= ? AND NOT (source_type = ? AND source_id = ?)`;
+  const args = [itemId, asOf, exclude[0], exclude[1]];
+  const own = d.get<Row>(`SELECT COALESCE(SUM(qty), 0) AS qty, MIN(date) AS received FROM stock_moves WHERE ${scope} AND source_line_id = ? AND qty > 0`, ...args, sourceLineId);
+  if (!own || !(own.qty > 0)) return 0;
+  if (org().valuation_method === 'wac') {
+    const t = d.get<Row>(
+      `SELECT COALESCE(SUM(CASE WHEN date <= ? THEN qty ELSE 0 END), 0) AS pool_after,
+              COALESCE(SUM(CASE WHEN date > ? AND qty > 0 THEN qty ELSE 0 END), 0) AS later_in, COALESCE(SUM(qty), 0) AS on_hand
+       FROM stock_moves WHERE ${scope}`, own.received, own.received, ...args)!;
+    const base = t.pool_after + t.later_in;
+    return base > 1e-9 ? own.qty * Math.min(1, Math.max(0, t.on_hand / base)) : 0;
+  }
+  // FIFO: a receipt's units are left once all issues are covered by the receipts before it (same order as revaluation).
+  const issued = d.value<number>(`SELECT COALESCE(SUM(-qty), 0) FROM stock_moves WHERE ${scope} AND qty < 0`, ...args) ?? 0;
+  const receipts = d.all<Row>(
+    `SELECT qty, cum FROM (
+       SELECT qty, source_line_id, SUM(qty) OVER (ORDER BY date, CASE WHEN kind = 'return_in' THEN 1 ELSE 0 END, id ROWS UNBOUNDED PRECEDING) AS cum
+       FROM stock_moves WHERE ${scope} AND qty > 0) WHERE source_line_id = ?`, ...args, sourceLineId);
+  return receipts.reduce((a, m) => a + Math.min(m.qty, Math.max(0, m.cum - issued)), 0);
+}
+
 // ---------- Stock queries ----------
 
+/** Quantity on confirmed sales orders that has not yet left the warehouse (shipped packages or delivery challans). */
 export function committedQty(itemId: number, warehouseId?: number): number {
   return db().value<number>(
-    `SELECT COALESCE(SUM(l.qty - COALESCE((SELECT SUM(pl.qty) FROM document_lines pl JOIN documents p ON p.id = pl.document_id
-        WHERE pl.ref_line_id = l.id AND p.type = 'package' AND p.status IN ('shipped','delivered')), 0)), 0)
+    `SELECT COALESCE(SUM(MAX(0, l.qty - COALESCE((SELECT SUM(pl.qty) FROM document_lines pl JOIN documents p ON p.id = pl.document_id
+        WHERE pl.ref_line_id = l.id AND ((p.type = 'package' AND p.status IN ('shipped','delivered'))
+          OR (p.type = 'delivery_challan' AND p.status IN ('open','delivered','invoiced')))), 0))), 0)
      FROM document_lines l JOIN documents d ON d.id = l.document_id
      WHERE d.type = 'sales_order' AND d.status = 'confirmed' AND l.item_id = ? AND (? IS NULL OR COALESCE(l.warehouse_id, d.warehouse_id) = ?)`,
     itemId, warehouseId ?? null, warehouseId ?? null) ?? 0;
 }
+/** Quantity on issued purchase orders not yet received (accepted quantity of receives). */
 export function incomingQty(itemId: number): number {
   return db().value<number>(
-    `SELECT COALESCE(SUM(l.qty - COALESCE((SELECT SUM(rl.qty) FROM document_lines rl JOIN documents r ON r.id = rl.document_id
-        WHERE rl.ref_line_id = l.id AND r.type = 'purchase_receive'), 0)), 0)
+    `SELECT COALESCE(SUM(MAX(0, l.qty - COALESCE((SELECT SUM(COALESCE(rl.qty2, rl.qty)) FROM document_lines rl JOIN documents r ON r.id = rl.document_id
+        WHERE rl.ref_line_id = l.id AND r.type = 'purchase_receive'), 0))), 0)
      FROM document_lines l JOIN documents d ON d.id = l.document_id
      WHERE d.type = 'purchase_order' AND d.status = 'issued' AND l.item_id = ?`, itemId) ?? 0;
 }

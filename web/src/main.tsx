@@ -6,6 +6,8 @@ import { Layout } from './components/Layout';
 import { Spinner, ToastProvider } from './components/ui';
 import { MetaProvider } from './lib/hooks';
 import Login from './pages/Login';
+import Setup from './pages/Setup';
+import { get } from './api';
 import './index.css';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -64,12 +66,20 @@ function Authed() {
 
 function App() {
   const [authed, setAuthed] = useState(!!getToken());
+  // A brand-new installation has no users yet: send visitors to the first-run setup instead of the sign-in page.
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(authed ? false : null);
+  useEffect(() => {
+    if (needsSetup === null) get('/setup').then((r) => setNeedsSetup(!!r.needs_setup)).catch(() => setNeedsSetup(false));
+  }, [needsSetup]);
+  if (needsSetup === null) return <Spinner />;
+  const done = () => { setNeedsSetup(false); setAuthed(true); };
   return (
     <BrowserRouter>
       <ToastProvider>
         <Routes>
-          <Route path="/login" element={<Login onLogin={() => setAuthed(true)} />} />
-          <Route path="/*" element={authed && getToken() ? <Authed /> : <Navigate to="/login" />} />
+          <Route path="/setup" element={<Setup onDone={done} />} />
+          <Route path="/login" element={needsSetup ? <Navigate to="/setup" /> : <Login onLogin={() => setAuthed(true)} />} />
+          <Route path="/*" element={needsSetup ? <Navigate to="/setup" /> : authed && getToken() ? <Authed /> : <Navigate to="/login" />} />
         </Routes>
       </ToastProvider>
     </BrowserRouter>

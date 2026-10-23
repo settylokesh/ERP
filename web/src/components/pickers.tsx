@@ -39,7 +39,7 @@ export function Combo({ options, value, onChange, placeholder = 'Select…', dis
               else if (e.key === 'Escape') setOpen(false);
             }} />
         ) : (
-          <span className={`min-w-0 flex-1 truncate ${selected ? '' : 'text-slate-400'}`} role="combobox" aria-label={ariaLabel ?? placeholder} aria-expanded={false} tabIndex={disabled ? -1 : 0}
+          <span className={`min-w-0 flex-1 truncate ${selected ? '' : 'text-slate-500'}`} role="combobox" aria-label={ariaLabel ?? placeholder} aria-expanded={false} tabIndex={disabled ? -1 : 0}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); } }}>
             {selected ? selected.label : placeholder}
           </span>

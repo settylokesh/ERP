@@ -166,7 +166,8 @@ export function postJournal(spec: JournalSpec): number | null {
 
 /**
  * Replaces all journals of a source with a fresh one (or removes them when spec is null).
- * Bank reconciliation marks are carried over per account so re-posting never un-reconciles a bank line.
+ * Bank reconciliation marks are carried over per account so re-posting never un-reconciles a bank line, and any bank
+ * statement line matched to the source is released if the new posting no longer matches it.
  */
 export function replaceJournal(sourceType: string, sourceId: number, spec: Omit<JournalSpec, 'source_type' | 'source_id'> | null) {
   const d = db();
@@ -175,24 +176,37 @@ export function replaceJournal(sourceType: string, sourceId: number, spec: Omit<
     `SELECT jl.account_id, jl.recon_id FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id
      WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL`, sourceType, sourceId)) recon.set(r.account_id, r.recon_id);
   d.run('DELETE FROM journals WHERE source_type = ? AND source_id = ?', sourceType, sourceId);
-  if (!spec) {
-    // The transaction left the books: release any bank statement line matched to it.
-    d.run(`UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL
-           WHERE matched_source_type = ? AND matched_source_id = ?`, sourceType, sourceId);
-    return null;
-  }
-  const id = postJournal({ ...spec, source_type: sourceType, source_id: sourceId });
+  const id = spec ? postJournal({ ...spec, source_type: sourceType, source_id: sourceId }) : null;
   if (id && recon.size) {
     for (const [account, rid] of recon) d.run('UPDATE journal_lines SET recon_id = ? WHERE journal_id = ? AND account_id = ?', rid, id, account);
   }
+  syncBankMatches(sourceType, sourceId);
   return id;
 }
 
-export function assertNotReconciled(sourceType: string, sourceId: number) {
+/**
+ * A bank statement line stays matched to a transaction only while that transaction still posts the same amount, in the
+ * same direction, to the statement's account. Lines whose transaction was deleted, voided, drafted or changed are released.
+ */
+export function syncBankMatches(sourceType: string, sourceId: number) {
+  const d = db();
+  for (const l of d.all<Row>('SELECT * FROM bank_statement_lines WHERE matched_source_type = ? AND matched_source_id = ?', sourceType, sourceId)) {
+    const posted = d.value<number>(
+      `SELECT COALESCE(SUM(${l.deposit > 0 ? 'jl.debit' : 'jl.credit'}), 0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id
+       WHERE j.source_type = ? AND j.source_id = ? AND j.status = 'posted' AND jl.account_id = ?`, sourceType, sourceId, l.account_id) ?? 0;
+    if (Math.abs(posted - (l.deposit || l.withdrawal)) > 0.005) releaseBankMatch(l.id);
+  }
+}
+
+export function releaseBankMatch(statementLineId: number) {
+  db().run(`UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL WHERE id = ?`, statementLineId);
+}
+
+export function assertNotReconciled(sourceType: string, sourceId: number, action = 'change') {
   const hit = db().get(
     `SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL`,
     sourceType, sourceId);
-  if (hit) fail('This transaction is part of a completed bank reconciliation. Undo the reconciliation first.', 422);
+  if (hit) fail(`This transaction is part of a completed bank reconciliation. Undo the reconciliation before you ${action} it.`, 422);
 }
 
 export function journalsFor(sourceType: string, sourceId: number) {

@@ -3,7 +3,7 @@ import { db, type Row } from '../src/db.js';
 import { createDocument } from '../src/documents/engine.js';
 import { acct, accountBalance } from '../src/ledger.js';
 import { saveContact, saveItem } from '../src/masters.js';
-import { initDatabase } from '../src/seed.js';
+import { completeSetup, initDatabase } from '../src/seed.js';
 import { setKv, getKv, DEFAULT_ORG } from '../src/settings.js';
 import { makeGstin } from '../src/util.js';
 
@@ -26,15 +26,17 @@ export interface Ctx {
 export function fresh(): Ctx {
   initDatabase(':memory:');
   const d = db();
-  setKv('org', { ...getKv('org', DEFAULT_ORG), name: 'Test Co', gstin: makeGstin('29', 'AABCT1234Q'), state_code: '29', inventory_start_date: '2026-04-01' });
-  const admin = loadUser(1)!;
+  const { user_id } = completeSetup({ organisation: { name: 'Test Co', state_code: '29', inventory_start_date: '2026-04-01' }, admin: { name: 'Admin', email: 'admin@example.com', password: 'admin-pass-123' } });
+  setKv('org', { ...getKv('org', DEFAULT_ORG), gstin: makeGstin('29', 'AABCT1234Q'), address: 'Industrial Area', city: 'Bengaluru', pincode: '560058' });
+  const admin = loadUser(user_id)!;
+  d.insert('currencies', { code: 'USD', name: 'US Dollar', symbol: '$', rate: 83, is_base: 0 });
   const wh = d.value<number>('SELECT id FROM warehouses LIMIT 1');
   const wh2 = d.insert('warehouses', { name: 'Second', is_primary: 0 });
   const tax18 = d.value<number>('SELECT id FROM taxes WHERE rate = 18');
   const tax5 = d.value<number>('SELECT id FROM taxes WHERE rate = 5');
   const bank = d.insert('accounts', { code: '1999', name: 'Test Bank', type: 'bank' });
-  const cust = saveContact({ kind: 'customer', name: 'KA Customer', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AAACK1111A'), email: 'ka@example.com', payment_terms: 30 });
-  const custMh = saveContact({ kind: 'customer', name: 'MH Customer', gst_treatment: 'business_gst', gstin: makeGstin('27', 'AAACM2222B') });
+  const cust = saveContact({ kind: 'customer', name: 'KA Customer', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AAACK1111A'), email: 'ka@example.com', payment_terms: 30, billing_address: 'MG Road', billing_city: 'Bengaluru', billing_pincode: '560001' });
+  const custMh = saveContact({ kind: 'customer', name: 'MH Customer', gst_treatment: 'business_gst', gstin: makeGstin('27', 'AAACM2222B'), billing_address: 'FC Road', billing_city: 'Pune', billing_pincode: '411004' });
   const consumer = saveContact({ kind: 'customer', name: 'Walk In', gst_treatment: 'consumer', place_of_supply: '29' });
   const vendor = saveContact({ kind: 'vendor', name: 'KA Vendor', gst_treatment: 'business_gst', gstin: makeGstin('29', 'AAACV3333C') });
   const vendorUp = saveContact({ kind: 'vendor', name: 'UP Vendor', gst_treatment: 'business_gst', gstin: makeGstin('09', 'AAACU4444D') });

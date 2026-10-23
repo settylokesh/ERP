@@ -1,6 +1,7 @@
 import { db, json, type Row } from '../db.js';
 import { acct, replaceJournal, type JLine } from '../ledger.js';
-import { currentUnitCost, isStockItem, revalueItems, setMoves, sourceStockValue, splitTracking, validateStock, type MoveSpec } from '../inventory.js';
+import { currentUnitCost, isStockItem, revalueItems, setMoves, sourceStockValue, splitTracking, unitsRemainingFromLine, validateStock, type MoveSpec } from '../inventory.js';
+import { openingDate } from '../settings.js';
 import { r2 } from '../util.js';
 import { DOC_TYPES } from './types.js';
 
@@ -71,9 +72,19 @@ export function buildMoves(doc: FullDoc): MoveSpec[] {
       break;
     }
     case 'vendor_credit':
-      // Lines marked as price corrections (return_to_stock = false) do not move goods.
       for (const l of stockLines) {
-        if (json<Row>(l.data, {}).return_to_stock === false) continue;
+        if (json<Row>(l.data, {}).return_to_stock === false) {
+          // Price correction: no goods move. The reduction lowers the cost of the billed units that are still in stock;
+          // the share relating to units already consumed goes to cost of goods sold (see buildJournal). Without a link
+          // to the bill line the units cannot be identified, so the whole correction goes to cost of goods sold.
+          const reduction = r2((l.taxable + (l.itc_eligible ? 0 : l.cgst + l.sgst + l.igst)) * ex);
+          const billed = l.ref_line_id ? db().value<number>('SELECT qty FROM document_lines WHERE id = ?', l.ref_line_id) ?? 0 : 0;
+          const remaining = billed > 0 ? unitsRemainingFromLine(l.item_id, l.ref_line_id, doc.date, [doc.type, doc.id]) : 0;
+          const share = billed > 0 ? Math.min(1, remaining / billed) : 0;
+          const delta = r2(reduction * share);
+          if (delta) moves.push({ item_id: l.item_id, source_line_id: l.id, warehouse_id: wh(l), date: doc.date, qty: 0, kind: 'value_adjust', value_delta: -delta, physical: false, accounting: true });
+          continue;
+        }
         add(l, { warehouse_id: wh(l), date: doc.date, qty: -l.qty, kind: 'return_out', physical: true, accounting: true }, true);
       }
       break;
@@ -182,13 +193,19 @@ export function buildJournal(doc: FullDoc): { date: string; memo: string; lines:
           const v = Math.abs(r2(stockValues.get(l.id)!));
           const inv = l.inventory_account_id || acct('inventory_asset');
           if (doc.type === 'vendor_credit') {
+            // Returns credit inventory at its carrying cost; price corrections credit only the share still in stock.
+            // Any difference to the credited amount is a cost-of-goods-sold variance.
             const amount = b(l.taxable + inelig);
             lines.push({ account_id: inv, credit: v, item_id: l.item_id, contact_id: c });
             const variance = r2(amount - v);
-            if (variance) lines.push({ account_id: acct('cogs'), credit: variance, item_id: l.item_id, contact_id: c, description: 'Purchase return price variance' });
+            if (variance) lines.push({ account_id: acct('cogs'), credit: variance, item_id: l.item_id, contact_id: c, description: ld.return_to_stock === false ? 'Purchase price correction on goods already consumed' : 'Purchase return price variance' });
           } else {
             push(inv, v, l.item_id);
           }
+        } else if (doc.type === 'vendor_credit' && ld.return_to_stock === false && l.item_type === 'goods' && l.track_inventory) {
+          // A price correction whose units have all been consumed (or that is not linked to a bill line) reduces cost of
+          // goods sold, the account those units were expensed to.
+          push(acct('cogs'), b(l.taxable + inelig), l.item_id, 'Purchase price correction on goods already consumed');
         } else {
           push(lineAccount(l, 'purchase'), b(l.taxable + inelig), l.item_id, l.description);
         }
@@ -253,8 +270,7 @@ export function postItemOpening(itemId: number) {
   const d = db();
   const item = d.get<Row>('SELECT * FROM items WHERE id = ?', itemId);
   if (!item) return;
-  const { inventory_start_date } = JSON.parse(d.value<string>("SELECT value FROM kv WHERE key = 'org'") ?? '{}');
-  const date = inventory_start_date || '2026-04-01';
+  const date = openingDate();
   const rows = isStockItem(item) ? json<Row[]>(item.opening_stock, []) : [];
   const moves: MoveSpec[] = [];
   for (const r of rows) {

@@ -4,8 +4,8 @@ import { db, fail, json, type Row } from './db.js';
 import { postItemOpening } from './documents/posting.js';
 import { availableBatches, availableSerials, stockSummary } from './inventory.js';
 import { ACCOUNT_TYPES, accountBalance, acct, categoryOf, replaceJournal } from './ledger.js';
-import { assertUnlocked, org } from './settings.js';
-import { GST_TREATMENTS, isRegistered, r2, STATES, validateGstin } from './util.js';
+import { assertUnlocked, openingDate, org } from './settings.js';
+import { GST_TREATMENTS, isEmail, isPincode, isRegistered, PAN_RE, r2, STATES, validateGstin } from './util.js';
 
 const str = (v: unknown) => (v == null ? null : String(v).trim() || null);
 
@@ -29,14 +29,24 @@ export function saveContact(input: Row, user?: AuthUser, id?: number) {
     if (gst_treatment === 'overseas') place_of_supply = '96';
     if (!STATES[place_of_supply]) fail('Place of supply is invalid', 422);
     const pan = str(input.pan)?.toUpperCase() ?? (gstin ? gstin.slice(2, 12) : null);
-    if (pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) fail('PAN format is invalid', 422);
+    if (pan && !PAN_RE.test(pan)) fail('PAN format is invalid', 422);
     const email = str(input.email);
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail('Email address is invalid', 422);
+    if (email && !isEmail(email)) fail('Email address is invalid', 422);
     const dupe = d.get<Row>('SELECT id FROM contacts WHERE kind = ? AND name = ? COLLATE NOCASE AND id <> ?', kind, name, id ?? -1);
     if (dupe) fail(`A ${kind} named "${name}" already exists`, 409);
+    for (const k of ['billing_pincode', 'shipping_pincode']) {
+      const v = str(input[k]);
+      if (v && gst_treatment !== 'overseas' && !isPincode(v)) fail('PIN code must be 6 digits', 422);
+    }
+    for (const k of ['billing_state', 'shipping_state']) if (str(input[k]) && !STATES[str(input[k])!]) fail('Address state is invalid', 422);
+    const country = str(input.billing_country)?.toUpperCase();
+    if (country && !/^[A-Z]{2}$/.test(country)) fail('Country must be a 2-letter ISO code (e.g. IN, AE, US)', 422);
     const row = {
       kind, name, company_name: str(input.company_name), email, phone: str(input.phone), gst_treatment, gstin, pan, place_of_supply,
-      billing_address: str(input.billing_address), shipping_address: str(input.shipping_address),
+      billing_address: str(input.billing_address), billing_city: str(input.billing_city), billing_pincode: str(input.billing_pincode),
+      billing_state: str(input.billing_state), billing_country: str(input.billing_country)?.toUpperCase() ?? null,
+      shipping_address: str(input.shipping_address), shipping_city: str(input.shipping_city), shipping_pincode: str(input.shipping_pincode),
+      shipping_state: str(input.shipping_state),
       payment_terms: Math.max(0, Number(input.payment_terms ?? existing?.payment_terms ?? 0) || 0),
       currency_code: input.currency_code ?? existing?.currency_code ?? 'INR', credit_limit: input.credit_limit === '' || input.credit_limit == null ? null : Number(input.credit_limit),
       price_list_id: input.price_list_id || null, opening_balance: r2(Number(input.opening_balance ?? existing?.opening_balance ?? 0)),
@@ -54,7 +64,7 @@ export function saveContact(input: Row, user?: AuthUser, id?: number) {
 /** Opening balances are posted against Opening Balance Adjustments on the inventory start date. */
 export function postContactOpening(id: number) {
   const c = db().get<Row>('SELECT * FROM contacts WHERE id = ?', id)!;
-  const date = org().inventory_start_date;
+  const date = openingDate();
   const amt = r2(c.opening_balance);
   if (!amt) return replaceJournal('contact_opening', id, null);
   const party = c.kind === 'customer' ? acct('accounts_receivable') : acct('accounts_payable');
@@ -72,7 +82,7 @@ export function contactBalance(id: number) {
   if (!c) return 0;
   const account = c.kind === 'customer' ? acct('accounts_receivable') : acct('accounts_payable');
   const raw = db().value<number>(
-    `SELECT COALESCE(SUM(jl.debit - jl.credit), 0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.account_id = ? AND jl.contact_id = ?`,
+    `SELECT COALESCE(SUM(jl.debit - jl.credit), 0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.account_id = ? AND jl.contact_id = ? AND j.status = 'posted'`,
     account, id) ?? 0;
   return r2(c.kind === 'customer' ? raw : -raw);
 }
@@ -115,13 +125,13 @@ export function contactStatement(id: number, from: string, to: string) {
   const account = c.kind === 'customer' ? acct('accounts_receivable') : acct('accounts_payable');
   const sign = c.kind === 'customer' ? 1 : -1;
   const opening = r2(sign * (d.value<number>(
-    `SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.account_id = ? AND jl.contact_id = ? AND j.date < ?`,
+    `SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE jl.account_id = ? AND jl.contact_id = ? AND j.status = 'posted' AND j.date < ?`,
     account, id, from) ?? 0));
   let running = opening;
   const rows = d.all<Row>(
     `SELECT j.date, j.source_type, j.source_id, j.memo, j.reference, SUM(jl.debit) AS debit, SUM(jl.credit) AS credit
      FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id
-     WHERE jl.account_id = ? AND jl.contact_id = ? AND j.date BETWEEN ? AND ? GROUP BY j.id ORDER BY j.date, j.id`, account, id, from, to)
+     WHERE jl.account_id = ? AND jl.contact_id = ? AND j.status = 'posted' AND j.date BETWEEN ? AND ? GROUP BY j.id ORDER BY j.date, j.id`, account, id, from, to)
     .map((r) => {
       const amt = r2(sign * (r.debit - r.credit));
       running = r2(running + amt);
@@ -141,8 +151,14 @@ export function saveItem(input: Row, user?: AuthUser, id?: number) {
     if (!['goods', 'service'].includes(type)) fail('Item type must be goods or service', 422);
     const sku = str(input.sku);
     if (sku && d.get('SELECT 1 FROM items WHERE sku = ? AND id <> ?', sku, id ?? -1)) fail(`SKU ${sku} is already used`, 409);
+    // Checked when the name is set or changed, so records that already share a name can still be edited.
+    if ((!existing || existing.name.toLowerCase() !== name.toLowerCase()) && d.get('SELECT 1 FROM items WHERE name = ? COLLATE NOCASE AND id <> ?', name, id ?? -1)) {
+      fail(`An item named "${name}" already exists`, 409);
+    }
     const hsn = str(input.hsn_code);
-    if (hsn && !/^\d{4,8}$/.test(hsn)) fail(type === 'service' ? 'SAC must be 4-8 digits' : 'HSN code must be 4-8 digits', 422);
+    // GST portals accept HSN/SAC codes of 4, 6 or 8 digits. Checked when the code is set or changed, so items saved
+    // before this rule can still be edited.
+    if (hsn && hsn !== existing?.hsn_code && !/^(\d{4}|\d{6}|\d{8})$/.test(hsn)) fail(type === 'service' ? 'SAC must have 4, 6 or 8 digits' : 'HSN code must have 4, 6 or 8 digits', 422);
     const tax_preference = input.tax_preference ?? 'taxable';
     if (!['taxable', 'exempt', 'nil', 'non_gst'].includes(tax_preference)) fail('Invalid tax preference', 422);
     if (tax_preference === 'taxable' && input.tax_id && !d.get('SELECT 1 FROM taxes WHERE id = ?', input.tax_id)) fail('Tax not found', 422);
@@ -172,7 +188,7 @@ export function saveItem(input: Row, user?: AuthUser, id?: number) {
       custom: JSON.stringify(input.custom ?? json(existing?.custom, {})), updated_at: new Date().toISOString(),
     };
     if (row.sales_rate < 0 || row.purchase_rate < 0) fail('Rates cannot be negative', 422);
-    if (opening.some((o) => Number(o.qty) > 0)) assertUnlocked('inventory', org().inventory_start_date, 'opening stock');
+    if (opening.some((o) => Number(o.qty) > 0)) assertUnlocked('inventory', openingDate(), 'opening stock');
     const iid = existing ? (d.update('items', existing.id, row), existing.id) : d.insert('items', row);
     if (input.opening_stock !== undefined || !existing) postItemOpening(iid);
     audit('item', iid, existing ? 'updated' : 'created', `Item ${name} ${existing ? 'updated' : 'created'}`, user);
@@ -301,7 +317,9 @@ export function saveWarehouse(input: Row, id?: number) {
     const err = validateGstin(input.gstin);
     if (err) fail(err, 422);
   }
-  const row = { name, code: str(input.code), address: str(input.address), state_code: input.state_code || (input.gstin ? String(input.gstin).slice(0, 2) : null), gstin: str(input.gstin)?.toUpperCase() ?? null, is_active: input.is_active === false || input.is_active === 0 ? 0 : 1, is_primary: input.is_primary ? 1 : 0 };
+  const pincode = str(input.pincode);
+  if (pincode && !isPincode(pincode)) fail('PIN code must be 6 digits', 422);
+  const row = { name, code: str(input.code), address: str(input.address), city: str(input.city), pincode, state_code: input.state_code || (input.gstin ? String(input.gstin).slice(0, 2) : null), gstin: str(input.gstin)?.toUpperCase() ?? null, is_active: input.is_active === false || input.is_active === 0 ? 0 : 1, is_primary: input.is_primary ? 1 : 0 };
   if (row.state_code && !STATES[row.state_code]) fail('Invalid state', 422);
   return d.tx(() => {
     if (row.is_primary) d.run('UPDATE warehouses SET is_primary = 0');

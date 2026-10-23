@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-async function login(page: Page, email = 'admin@saral.local', password = 'admin123') {
+// Accounts created by server/test/e2e-server.ts and the sample-company fixture.
+async function login(page: Page, email = 'admin@example.com', password = 'admin-pass-123') {
   await page.goto('/login');
   await page.getByLabel('Email').fill(email);
   await page.getByLabel('Password').fill(password);
@@ -69,7 +70,7 @@ test('creates a customer with GSTIN validation', async ({ page }) => {
 });
 
 test('role permissions hide restricted modules', async ({ page }) => {
-  await login(page, 'sales@saral.local', 'demo1234');
+  await login(page, 'sales@example.com', 'sample-pass-123');
   const nav = page.getByRole('navigation', { name: 'Main' });
   await expect(nav.getByText('Sales')).toBeVisible();
   await expect(nav.getByText('People & Payroll')).toHaveCount(0);
@@ -108,19 +109,33 @@ test('sales order → package → shipment via the Create menu', async ({ page }
   await expect(page.getByText('Shipment', { exact: true })).toBeVisible();
 });
 
-test('generates an e-way bill from an invoice', async ({ page }) => {
+test('downloads the e-way bill JSON and records the e-way bill number', async ({ page }) => {
   await login(page);
   await page.goto('/docs/invoice?status=unpaid');
-  await page.locator('tbody tr').first().click();
+  await page.locator('tbody tr', { hasText: 'Sri Lakshmi' }).first().click();
   await page.getByRole('button', { name: 'More' }).click();
-  await page.getByRole('button', { name: 'Generate e-Way Bill' }).click();
-  const dlg = page.getByRole('dialog');
+  await page.getByRole('button', { name: 'Download e-way bill JSON' }).click();
+  let dlg = page.getByRole('dialog');
+  await dlg.getByLabel('Approximate distance (km)').fill('35');
+  await dlg.getByLabel('Vehicle number (Part-B)').fill('KA01AB1234');
+  const [file] = await Promise.all([page.waitForEvent('download'), dlg.getByRole('button', { name: 'Download JSON' }).click()]);
+  expect(file.suggestedFilename()).toMatch(/^ewaybill_INV-\d+\.json$/);
+
+  await page.getByRole('button', { name: 'More' }).click();
+  await page.getByRole('button', { name: 'Record e-Way Bill' }).click();
+  dlg = page.getByRole('dialog');
+  await dlg.getByLabel('e-Way bill number').fill('381000654321');
   await dlg.getByLabel('Approximate distance (km)').fill('420');
   await dlg.getByLabel('Vehicle number (Part-B)').fill('KA01AB1234');
-  await dlg.getByLabel('Generate even if below the threshold').check();
-  await dlg.getByRole('button', { name: 'Generate e-Way Bill' }).click();
-  await expect(page.getByText('e-Way Bill').first()).toBeVisible();
+  await dlg.getByRole('button', { name: 'Record e-Way Bill' }).click();
+  await expect(page.getByText('381000654321').first()).toBeVisible();
   await expect(page.getByText('420 km')).toBeVisible();
+});
+
+test('opens GSTR-3B for the period in the link', async ({ page }) => {
+  await login(page);
+  await page.goto('/compliance/gstr3b?period=2026-08');
+  await expect(page.getByLabel('Return period')).toHaveValue('2026-08');
 });
 
 test('categorises a bank statement line', async ({ page }) => {
@@ -151,4 +166,29 @@ test('creates, approves and pays a pay run', async ({ page }) => {
   await page.getByRole('option', { name: /HDFC Bank/ }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Record' }).click();
   await expect(page.getByText('Payment recorded')).toBeVisible();
+});
+
+test('a user added by an administrator chooses their own password at first sign-in', async ({ page, browser }) => {
+  await login(page);
+  await page.goto('/settings/users');
+  await page.getByRole('button', { name: 'Add user' }).click();
+  const dlg = page.getByRole('dialog');
+  await dlg.getByLabel('Name').fill('Store Assistant');
+  await dlg.getByLabel('Email').fill('assistant@example.com');
+  await dlg.getByLabel('Role').selectOption({ label: 'Warehouse Manager' });
+  await dlg.getByLabel(/^Password/).fill('temporary-123');
+  await dlg.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('assistant@example.com')).toBeVisible();
+
+  const other = await (await browser.newContext()).newPage();
+  await other.goto('/login');
+  await other.getByLabel('Email').fill('assistant@example.com');
+  await other.getByLabel('Password').fill('temporary-123');
+  await other.getByRole('button', { name: 'Sign in' }).click();
+  await expect(other.getByRole('heading', { name: 'Choose a new password' })).toBeVisible();
+  await other.getByLabel('Current password').fill('temporary-123');
+  await other.getByLabel(/^New password/).fill('my-own-pass-1');
+  await other.getByLabel('Confirm new password').fill('my-own-pass-1');
+  await other.getByRole('button', { name: 'Change password' }).click();
+  await expect(other.getByRole('heading', { name: /^Hello/ })).toBeVisible();
 });

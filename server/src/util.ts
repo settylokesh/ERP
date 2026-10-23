@@ -11,6 +11,13 @@ export const num = (v: unknown, d = 0): number => {
 };
 
 export const today = () => new Date().toISOString().slice(0, 10);
+
+/** Shared format checks. */
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const PINCODE_RE = /^[1-9][0-9]{5}$/;
+export const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+export const isEmail = (s: unknown) => typeof s === 'string' && EMAIL_RE.test(s);
+export const isPincode = (s: unknown) => typeof s === 'string' && PINCODE_RE.test(s);
 export const isDate = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
 export const addDays = (date: string, days: number) => {
   const d = new Date(date + 'T00:00:00Z');
@@ -92,7 +99,11 @@ export const GST_TREATMENTS: Record<string, string> = {
 };
 export const isRegistered = (t?: string | null) => t === 'business_gst' || t === 'business_composition' || t === 'sez' || t === 'deemed_export';
 
-export function amountInWords(n: number): string {
+/**
+ * Amount in words for printed documents. Rupees use the Indian system (lakh, crore) as required on tax invoices;
+ * other currencies use the international system (thousand, million, billion) with cents.
+ */
+export function amountInWords(n: number, currency = 'INR'): string {
   const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve',
     'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
   const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
@@ -101,22 +112,34 @@ export function amountInWords(n: number): string {
     const h = Math.floor(x / 100), r = x % 100;
     return [h ? `${ones[h]} Hundred` : '', r ? two(r) : ''].filter(Boolean).join(' ');
   };
-  const inWords = (x: number): string => {
+  const indian = (x: number): string => {
     if (x === 0) return 'Zero';
     const parts: string[] = [];
     const crore = Math.floor(x / 1e7); x %= 1e7;
     const lakh = Math.floor(x / 1e5); x %= 1e5;
     const thousand = Math.floor(x / 1e3); x %= 1e3;
-    if (crore) parts.push(`${inWords(crore)} Crore`);
+    if (crore) parts.push(`${indian(crore)} Crore`);
     if (lakh) parts.push(`${two(lakh)} Lakh`);
     if (thousand) parts.push(`${two(thousand)} Thousand`);
     if (x) parts.push(three(x));
     return parts.join(' ');
   };
+  const international = (x: number): string => {
+    if (x === 0) return 'Zero';
+    const parts: string[] = [];
+    for (const [size, name] of [[1e9, 'Billion'], [1e6, 'Million'], [1e3, 'Thousand']] as const) {
+      const q = Math.floor(x / size);
+      if (q) parts.push(`${international(q)} ${name}`);
+      x %= size;
+    }
+    if (x) parts.push(three(x));
+    return parts.join(' ');
+  };
   const abs = Math.abs(r2(n));
-  const rupees = Math.floor(abs);
-  const paise = Math.round((abs - rupees) * 100);
-  return `Indian Rupee ${inWords(rupees)}${paise ? ` and ${two(paise)} Paise` : ''} Only`;
+  const whole = Math.floor(abs);
+  const fraction = Math.round((abs - whole) * 100);
+  if (currency === 'INR') return `Indian Rupee ${indian(whole)}${fraction ? ` and ${two(fraction)} Paise` : ''} Only`;
+  return `${currency} ${international(whole)}${fraction ? ` and ${two(fraction)} Cents` : ''} Only`;
 }
 
 export const pick = <T extends object, K extends keyof T>(o: T, keys: K[]): Pick<T, K> => {

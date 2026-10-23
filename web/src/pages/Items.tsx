@@ -42,12 +42,12 @@ function ItemList() {
       <div className="space-y-3 p-5">
         <div className="flex flex-wrap gap-2">
           <Input className="w-64" placeholder="Search name, SKU, HSN" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search items" />
-          <Select className="w-40" value={type} onChange={(e) => setType(e.target.value)} placeholder="All types" options={[{ value: 'goods', label: 'Goods' }, { value: 'service', label: 'Services' }]} />
+          <Select aria-label="Item type" className="w-40" value={type} onChange={(e) => setType(e.target.value)} placeholder="All types" options={[{ value: 'goods', label: 'Goods' }, { value: 'service', label: 'Services' }]} />
         </div>
         <ErrorBox error={error} />
         {loading && !data ? <Spinner /> : (
           <DataTable exportName="items" rows={data ?? []} onRow={(r) => nav(`/items/${r.id}`)} cols={[
-            { key: 'name', label: 'Name', render: (r) => <span className="link font-medium">{r.name}{!r.is_active && <span className="ml-1 text-xs text-slate-400">(inactive)</span>}</span> },
+            { key: 'name', label: 'Name', render: (r) => <span className="link font-medium">{r.name}{!r.is_active && <span className="ml-1 text-xs text-slate-500">(inactive)</span>}</span> },
             { key: 'sku', label: 'SKU' }, { key: 'hsn_code', label: 'HSN/SAC' }, { key: 'type', label: 'Type', render: (r) => titleCase(r.type) },
             { key: 'tax_name', label: 'GST', render: (r) => (r.tax_preference !== 'taxable' ? titleCase(r.tax_preference) : r.tax_rate != null ? `${r.tax_rate}%` : '-') },
             { key: 'stock_on_hand', label: 'Stock on Hand', num: true, render: (r) => (r.track_inventory ? <span className={r.reorder_level && r.stock_on_hand <= r.reorder_level ? 'font-medium text-amber-700' : ''}>{qty(r.stock_on_hand)} {r.unit}</span> : '-') },
@@ -117,7 +117,7 @@ function ItemForm() {
                       const upd = (p: any) => set({ opening_stock: f.opening_stock.map((x: any, j: number) => (j === i ? { ...x, ...p } : x)) });
                       return (
                         <tr key={i}>
-                          <td><Select value={o.warehouse_id} onChange={(e) => upd({ warehouse_id: Number(e.target.value) })} options={meta.warehouses.map((w) => ({ value: w.id, label: w.name }))} /></td>
+                          <td><Select aria-label="Warehouse" value={o.warehouse_id} onChange={(e) => upd({ warehouse_id: Number(e.target.value) })} options={meta.warehouses.map((w) => ({ value: w.id, label: w.name }))} /></td>
                           <td><Input type="number" className="text-right" value={o.qty} onChange={(e) => upd({ qty: Number(e.target.value) })} /></td>
                           <td><Input type="number" className="text-right" value={o.rate} onChange={(e) => upd({ rate: Number(e.target.value) })} /></td>
                           {f.tracking === 'serial' && <td><Input value={(o.tracking ?? []).map((t: any) => t.serial_no).join(', ')} onChange={(e) => upd({ tracking: e.target.value.split(',').map((s) => s.trim()).filter(Boolean).map((s) => ({ serial_no: s })) })} /></td>}

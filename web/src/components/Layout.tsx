@@ -172,7 +172,7 @@ function Notifications() {
                 onClick={async () => { await post(`/notifications/${n.id}/read`); setOpen(false); reload(); if (n.link) nav(n.link); }}>
                 <div className="font-medium">{n.title}</div>
                 {n.body && <div className="text-xs text-slate-500">{n.body}</div>}
-                <div className="mt-0.5 text-[11px] text-slate-400">{dateTime(n.at)}</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">{dateTime(n.at)}</div>
               </button>
             ))}
           </div>
@@ -251,11 +251,46 @@ function UserMenu() {
   );
 }
 
+/** Shown instead of the app while the signed-in user must replace a temporary or former default password. */
+function RequiredPasswordChange() {
+  const { meta, reload } = useMeta();
+  const nav = useNavigate();
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' });
+  const [error, setError] = useState<string | null>(null);
+  const { run, busy } = useAction();
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (form.next !== form.confirm) { setError('New passwords do not match'); return; }
+    setError(null);
+    if (await run(() => post('/auth/password', { current: form.current, next: form.next }), 'Password changed')) await reload();
+  };
+  return (
+    <div className="flex min-h-full items-center justify-center bg-slate-100 p-4">
+      <form className="card w-full max-w-md space-y-4 p-6" onSubmit={submit}>
+        <div>
+          <h1 className="text-lg">Choose a new password</h1>
+          <p className="mt-1 text-slate-600">Hello {meta.user.name}. Your password was set by an administrator or is a former default, so it must be changed before you continue.</p>
+        </div>
+        {error && <p className="rounded-md border border-red-200 bg-red-50 p-2 text-red-700">{error}</p>}
+        <Field label="Current password"><Input type="password" autoComplete="current-password" value={form.current} onChange={(e) => setForm({ ...form, current: e.target.value })} required /></Field>
+        <Field label="New password" hint="At least 8 characters"><Input type="password" autoComplete="new-password" minLength={8} value={form.next} onChange={(e) => setForm({ ...form, next: e.target.value })} required /></Field>
+        <Field label="Confirm new password"><Input type="password" autoComplete="new-password" minLength={8} value={form.confirm} onChange={(e) => setForm({ ...form, confirm: e.target.value })} required /></Field>
+        <div className="flex gap-2">
+          <button className="btn btn-primary" disabled={busy}>Change password</button>
+          <button type="button" className="btn" onClick={async () => { await post('/auth/logout').catch(() => undefined); setToken(''); nav('/login'); window.location.reload(); }}>Sign out</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export function Layout({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const can = useCan();
+  const { meta } = useMeta();
   const loc = useLocation();
   useEffect(() => setOpen(false), [loc.pathname]);
+  if (meta.user.must_change_password) return <RequiredPasswordChange />;
   return (
     <div className="flex h-full">
       <Sidebar open={open} onNavigate={() => setOpen(false)} />

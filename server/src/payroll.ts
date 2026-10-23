@@ -3,7 +3,7 @@ import type { AuthUser } from './auth.js';
 import { db, fail, json, type Row } from './db.js';
 import { acct, journalsFor, replaceJournal, type JLine } from './ledger.js';
 import { assertUnlocked, nextNumber, org, payrollSettings, type PayrollSettings } from './settings.js';
-import { daysInMonth, fiscalYear, isDate, monthEnd, r2, STATES } from './util.js';
+import { daysInMonth, fiscalYear, isDate, monthEnd, PAN_RE, r2, STATES } from './util.js';
 
 export const DEFAULT_COMPONENTS = [
   { code: 'BASIC', name: 'Basic', kind: 'earning', calc: 'pct_ctc', value: 50, pf_applicable: 1, esi_applicable: 1, sort: 1 },
@@ -27,13 +27,17 @@ export function saveEmployee(input: Row, user?: AuthUser, id?: number) {
   if (!isDate(doj)) fail('Date of joining is required', 422);
   if (input.exit_date && (!isDate(input.exit_date) || input.exit_date < doj)) fail('Exit date must be after the joining date', 422);
   const pan = input.pan ? String(input.pan).toUpperCase() : null;
-  if (pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) fail('PAN format is invalid', 422);
+  if (pan && !PAN_RE.test(pan)) fail('PAN format is invalid', 422);
   if (input.uan && !/^\d{12}$/.test(String(input.uan))) fail('UAN must be 12 digits', 422);
   if (input.ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(String(input.ifsc).toUpperCase())) fail('IFSC format is invalid', 422);
   const work_state = input.work_state ?? org().state_code;
   if (!STATES[work_state]) fail('Work location state is invalid', 422);
   const annual_ctc = r2(Number(input.annual_ctc));
   if (!(annual_ctc >= 0)) fail('Annual CTC is invalid', 422);
+  const ytd_fy = input.ytd_fy ? String(input.ytd_fy) : null;
+  if (ytd_fy && !/^\d{4}-\d{2}$/.test(ytd_fy)) fail('Opening year-to-date tax year must look like 2026-27', 422);
+  const ytd_gross = r2(Number(input.ytd_gross ?? 0)), ytd_tds = r2(Number(input.ytd_tds ?? 0));
+  if (!(ytd_gross >= 0) || !(ytd_tds >= 0)) fail('Opening year-to-date amounts cannot be negative', 422);
   const row = {
     emp_code, name, email: input.email ?? null, phone: input.phone ?? null, gender: input.gender ?? null, dob: input.dob || null, doj,
     exit_date: input.exit_date || null, department_id: input.department_id || null, designation_id: input.designation_id || null, work_state, pan,
@@ -41,6 +45,7 @@ export function saveEmployee(input: Row, user?: AuthUser, id?: number) {
     ifsc: input.ifsc ? String(input.ifsc).toUpperCase() : null, annual_ctc, components: JSON.stringify(input.components ?? {}),
     pf_enabled: input.pf_enabled === false || input.pf_enabled === 0 ? 0 : 1, esi_enabled: input.esi_enabled === false || input.esi_enabled === 0 ? 0 : 1, pt_enabled: input.pt_enabled === false || input.pt_enabled === 0 ? 0 : 1,
     tds_enabled: input.tds_enabled === false || input.tds_enabled === 0 ? 0 : 1, status: input.exit_date ? 'exited' : input.status === 'inactive' ? 'inactive' : 'active',
+    ytd_fy, ytd_gross: ytd_fy ? ytd_gross : 0, ytd_tds: ytd_fy ? ytd_tds : 0,
   };
   structure({ ...row, components: row.components }, payrollSettings(), row.doj); // validates the CTC split
   const eid = id ? (d.update('employees', id, row), id) : d.insert('employees', row);
@@ -151,17 +156,27 @@ export function computePayslip(emp: Row, period: string, lopDays: number, s: Pay
     if (pt) deductions.push({ code: 'PT', name: 'Professional Tax', amount: pt });
   }
   if (emp.tds_enabled && s.tds.enabled) {
+    // The income-tax year is April-March. Projected income for the year =
+    //   salary on approved payslips this year
+    //   + opening year-to-date salary (paid before payroll moved here, or by a previous employer), when entered;
+    //     otherwise the current monthly gross for each earlier month of employment that has no payslip
+    //   + the current monthly gross for this and the remaining months.
+    // Tax still due after TDS already deducted is spread evenly over this and the remaining months.
     const fy = fiscalYear(start, 4);
-    const annualGross = st.gross * 12;
+    const monthIndex = (ym: string) => Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1;
+    const remaining = Math.max(1, monthIndex(fy.end) - monthIndex(period) + 1);
+    const prior = db().get<Row>(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(p.gross),0) AS gross, COALESCE(SUM(json_extract(p.extra, '$.tds')),0) AS tds FROM payslips p JOIN pay_runs r ON r.id = p.pay_run_id
+       WHERE p.employee_id = ? AND r.period >= ? AND r.period < ? AND r.id <> ? AND r.status IN ('approved','paid')`,
+      emp.id, fy.start.slice(0, 7), period, excludeRunId ?? -1) ?? { n: 0, gross: 0, tds: 0 };
+    const opening = emp.ytd_fy === fy.label;
+    const employedFrom = [fy.start.slice(0, 7), String(emp.doj).slice(0, 7)].sort().pop()!;
+    const gapMonths = opening ? 0 : Math.max(0, monthIndex(period) - monthIndex(employedFrom) - prior.n);
+    const annualGross = prior.gross + (opening ? emp.ytd_gross : 0) + st.gross * (gapMonths + remaining);
     const taxable = Math.max(0, annualGross - s.tds.standard_deduction);
     const tax = annualTax(taxable, s);
-    const deducted = db().value<number>(
-      `SELECT COALESCE(SUM(json_extract(p.extra, '$.tds')),0) FROM payslips p JOIN pay_runs r ON r.id = p.pay_run_id
-       WHERE p.employee_id = ? AND r.period >= ? AND r.period < ? AND r.id <> ?`, emp.id, fy.start.slice(0, 7), period, excludeRunId ?? -1) ?? 0;
-    const [ey, em] = fy.end.split('-').map(Number);
-    const [py, pm] = period.split('-').map(Number);
-    const remaining = (ey - py) * 12 + (em - pm) + 1;
-    const tds = Math.max(0, Math.round((tax - deducted) / Math.max(1, remaining)));
+    const deducted = prior.tds + (opening ? emp.ytd_tds : 0);
+    const tds = Math.max(0, Math.round((tax - deducted) / remaining));
     if (tds) deductions.push({ code: 'TDS', name: 'Income Tax (TDS)', amount: tds });
   }
   const totalDed = r2(deductions.reduce((a, x) => a + x.amount, 0));
@@ -187,6 +202,8 @@ export function createPayRun(input: Row, user?: AuthUser) {
     if (d.get('SELECT 1 FROM pay_runs WHERE period = ?', period)) fail(`A pay run for ${period} already exists`, 409);
     const prevDraft = d.get<Row>("SELECT period FROM pay_runs WHERE status = 'draft' AND period < ?", period);
     if (prevDraft) fail(`Approve the ${prevDraft.period} pay run first`, 422);
+    const later = d.get<Row>('SELECT period FROM pay_runs WHERE period > ? ORDER BY period LIMIT 1', period);
+    if (later) fail(`Pay runs are processed in order: a pay run for ${later.period} already exists`, 422);
     const pay_date = input.pay_date ?? monthEnd(`${period}-01`);
     if (!isDate(pay_date)) fail('Pay date is invalid', 422);
     const emps = eligibleEmployees(period);

@@ -35,7 +35,7 @@ export function useDebounced<T>(value: T, ms = 250) {
 }
 
 export interface Meta {
-  user: { id: number; name: string; email: string; role_name: string; is_admin: boolean; permissions: Record<string, Record<string, boolean>> };
+  user: { id: number; name: string; email: string; role_name: string; is_admin: boolean; must_change_password?: boolean; permissions: Record<string, Record<string, boolean>> };
   org: any;
   doc_types: Record<string, any>;
   states: Record<string, string>;

@@ -6,7 +6,7 @@ import { committedQty } from './inventory.js';
 import { accountBalance } from './ledger.js';
 import { org } from './settings.js';
 import { addDays, addMonths, daysBetween, fiscalYear, monthEnd, r2, today } from './util.js';
-import { audit } from './activity.js';
+import { adminUsers, audit, notify } from './activity.js';
 import { json, fail } from './db.js';
 
 function agingTotals(type: 'invoice' | 'bill') {
@@ -28,21 +28,23 @@ export function dashboard(user?: AuthUser) {
   const t = today();
   const fy = fiscalYear(t, o.fiscal_year_start_month);
   const months = Array.from({ length: 12 }, (_, i) => addMonths(fy.start, i)).filter((m) => m <= t);
+  // Transfers between the company's own cash and bank accounts are not cash in or out.
+  const external = `EXISTS (SELECT 1 FROM journal_lines x JOIN accounts xa ON xa.id = x.account_id WHERE x.journal_id = j.id AND xa.type NOT IN ('cash','bank'))`;
   const monthly = months.map((m) => {
     const end = monthEnd(m);
     const sum = (sql: string) => r2(d.value<number>(sql, m, end) ?? 0);
     return {
       month: m.slice(0, 7),
-      income: sum(`SELECT COALESCE(SUM(jl.credit - jl.debit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('income','other_income') AND j.date BETWEEN ? AND ?`),
-      expense: sum(`SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('expense','cost_of_goods_sold','other_expense') AND j.date BETWEEN ? AND ?`),
-      cash_in: sum(`SELECT COALESCE(SUM(jl.debit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.date BETWEEN ? AND ? AND j.source_type NOT IN ('bank_txn_transfer')`),
-      cash_out: sum(`SELECT COALESCE(SUM(jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.date BETWEEN ? AND ?`),
-      cash_balance: r2(d.value<number>(`SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.date <= ?`, end) ?? 0),
+      income: sum(`SELECT COALESCE(SUM(jl.credit - jl.debit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('income','other_income') AND j.status = 'posted' AND j.date BETWEEN ? AND ?`),
+      expense: sum(`SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('expense','cost_of_goods_sold','other_expense') AND j.status = 'posted' AND j.date BETWEEN ? AND ?`),
+      cash_in: sum(`SELECT COALESCE(SUM(jl.debit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.status = 'posted' AND j.date BETWEEN ? AND ? AND ${external}`),
+      cash_out: sum(`SELECT COALESCE(SUM(jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.status = 'posted' AND j.date BETWEEN ? AND ? AND ${external}`),
+      cash_balance: r2(d.value<number>(`SELECT COALESCE(SUM(jl.debit - jl.credit),0) FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id WHERE a.type IN ('cash','bank') AND j.status = 'posted' AND j.date <= ?`, end) ?? 0),
     };
   });
   const topExpenses = d.all<Row>(
     `SELECT a.name, SUM(jl.debit - jl.credit) AS amount FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id JOIN accounts a ON a.id = jl.account_id
-     WHERE a.type IN ('expense','other_expense','cost_of_goods_sold') AND j.date BETWEEN ? AND ? GROUP BY a.id HAVING amount > 0 ORDER BY amount DESC LIMIT 6`, fy.start, t)
+     WHERE a.type IN ('expense','other_expense','cost_of_goods_sold') AND j.status = 'posted' AND j.date BETWEEN ? AND ? GROUP BY a.id HAVING amount > 0 ORDER BY amount DESC LIMIT 6`, fy.start, t)
     .map((r) => ({ ...r, amount: r2(r.amount) }));
   const banks = d.all<Row>("SELECT id, name, type FROM accounts WHERE type IN ('bank','cash','credit_card') AND is_active = 1 ORDER BY type, name").map((a) => ({ ...a, balance: accountBalance(a.id) }));
   const count = (sql: string, ...p: unknown[]) => d.value<number>(sql, ...p) ?? 0;
@@ -58,7 +60,7 @@ export function dashboard(user?: AuthUser) {
      FROM items i WHERE i.track_inventory = 1 AND i.reorder_level > 0 AND i.is_active = 1`).map((r) => ({ ...r, stock: r2(r.stock), available: r2(r.stock - committedQty(r.id)) })).filter((r) => r.available <= r.reorder_level);
   const inventory = {
     quantity_in_hand: r2(count("SELECT COALESCE(SUM(qty),0) FROM stock_moves WHERE physical = 1")),
-    quantity_to_receive: r2(count(`SELECT COALESCE(SUM(l.qty - COALESCE((SELECT SUM(rl.qty) FROM document_lines rl JOIN documents r ON r.id = rl.document_id WHERE rl.ref_line_id = l.id AND r.type = 'purchase_receive'),0)),0)
+    quantity_to_receive: r2(count(`SELECT COALESCE(SUM(MAX(0, l.qty - COALESCE((SELECT SUM(COALESCE(rl.qty2, rl.qty)) FROM document_lines rl JOIN documents r ON r.id = rl.document_id WHERE rl.ref_line_id = l.id AND r.type = 'purchase_receive'),0))),0)
       FROM document_lines l JOIN documents d ON d.id = l.document_id WHERE d.type = 'purchase_order' AND d.status = 'issued'`)),
     stock_value: r2(count("SELECT COALESCE(SUM(value),0) FROM stock_moves WHERE accounting = 1")),
     active_items: count('SELECT COUNT(*) FROM items WHERE is_active = 1'),
@@ -90,7 +92,7 @@ export function dashboard(user?: AuthUser) {
   if (o.gstin) {
     const r1 = `${dueMonth}-11`, r3 = `${dueMonth}-20`;
     const parts = [r1 >= t ? `GSTR-1 by ${r1}` : null, `GSTR-3B by ${r3}`].filter(Boolean).join(' and ');
-    insights.push({ level: 'info', text: `${label(returnPeriod)} returns: file ${parts} (monthly filers).`, link: `/compliance/gstr3b` });
+    insights.push({ level: 'info', text: `${label(returnPeriod)} returns: file ${parts} (monthly filers).`, link: `/compliance/gstr3b?period=${returnPeriod}` });
   }
   const cashBurn = monthly.length >= 2 ? r2(monthly.slice(-3).reduce((a, m) => a + (m.cash_out - m.cash_in), 0) / Math.min(3, monthly.length)) : 0;
   const cashNow = banks.filter((b) => b.type !== 'credit_card').reduce((a, b) => a + b.balance, 0);
@@ -144,22 +146,39 @@ export function saveRecurring(input: Row, id?: number) {
   return d.insert('recurring_profiles', row);
 }
 
-/** Generates all invoices that are due up to `upto` for active recurring profiles. */
+/**
+ * Generates all invoices that are due up to `upto` for active recurring profiles. Each profile runs in its own
+ * transaction: a profile that fails (for example, an item was deleted) is stopped and reported to administrators once,
+ * without affecting the others.
+ */
 export function runRecurring(upto = today(), user?: AuthUser) {
   const d = db();
   const created: number[] = [];
   for (const p of d.all<Row>("SELECT * FROM recurring_profiles WHERE status = 'active' AND next_date <= ?", upto)) {
-    let next = p.next_date;
-    let guard = 0;
-    while (next <= upto && (!p.end_date || next <= p.end_date) && guard++ < 60) {
-      const tpl = json<Row>(p.template, {});
-      const id = createDocument('invoice', { ...tpl, contact_id: p.contact_id, date: next, due_date: undefined, reference: `Recurring: ${p.name}` }, user, { submit: true });
-      if (p.auto_send && d.value<string>('SELECT email FROM contacts WHERE id = ?', p.contact_id)) emailDocument(id, undefined, user);
-      created.push(id);
-      next = advance(next, p.frequency, p.every);
+    try {
+      const ids = d.tx(() => {
+        const made: number[] = [];
+        let next = p.next_date;
+        let guard = 0;
+        while (next <= upto && (!p.end_date || next <= p.end_date) && guard++ < 60) {
+          const tpl = json<Row>(p.template, {});
+          const id = createDocument('invoice', { ...tpl, contact_id: p.contact_id, date: next, due_date: undefined, reference: `Recurring: ${p.name}` }, user, { submit: true });
+          if (p.auto_send && d.value<string>('SELECT email FROM contacts WHERE id = ?', p.contact_id)) emailDocument(id, undefined, user);
+          made.push(id);
+          next = advance(next, p.frequency, p.every);
+        }
+        d.update('recurring_profiles', p.id, { next_date: next, status: p.end_date && next > p.end_date ? 'expired' : 'active' });
+        audit('recurring', p.id, 'generated', `Generated ${made.length} invoice(s) up to ${upto}`, user);
+        return made;
+      });
+      created.push(...ids);
+    } catch (e: any) {
+      // Stop the profile so the hourly run does not fail (and alert) again until someone fixes it and reactivates it.
+      d.update('recurring_profiles', p.id, { status: 'stopped' });
+      audit('recurring', p.id, 'failed', `Recurring profile "${p.name}" stopped: could not generate an invoice: ${e?.message ?? e}`, user);
+      notify(adminUsers(), `Recurring invoice "${p.name}" stopped`,
+        `${e?.message ?? e}. Fix the problem, then set the profile to Active; missed invoices are generated on the next run.`, '/recurring');
     }
-    d.update('recurring_profiles', p.id, { next_date: next, status: p.end_date && next > p.end_date ? 'expired' : 'active' });
-    audit('recurring', p.id, 'generated', `Generated invoices up to ${upto}`, user);
   }
   return created;
 }

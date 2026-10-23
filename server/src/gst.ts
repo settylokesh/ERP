@@ -1,4 +1,5 @@
 import { db, fail, json, type Row } from './db.js';
+import { isService, uqc } from './einvoice.js';
 import { org } from './settings.js';
 import { gstSetOff } from './tax.js';
 import { monthEnd, r2, STATES } from './util.js';
@@ -54,8 +55,10 @@ export function gstr1(period: string) {
     const kind = isB2B(doc.c_treatment) ? 'b2b' : 'b2c';
     for (const l of doc.lines) {
       const ex = doc.exchange_rate || 1;
-      const key = `${kind}|${l.hsn_code ?? 'NA'}|${l.tax_rate}|${l.unit ?? 'OTH'}`;
-      const cur = hsn.get(key) ?? { section: kind, hsn_sc: l.hsn_code ?? '', desc: l.description?.slice(0, 30), uqc: (l.unit ?? 'OTH').toUpperCase(), qty: 0, rt: l.tax_rate, txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 };
+      // Services are reported with UQC "NA"; goods with the GST unit quantity code of their unit.
+      const unit = isService(l) ? 'NA' : uqc(l.unit);
+      const key = `${kind}|${l.hsn_code ?? 'NA'}|${l.tax_rate}|${unit}`;
+      const cur = hsn.get(key) ?? { section: kind, hsn_sc: l.hsn_code ?? '', desc: l.description?.slice(0, 30), uqc: unit, qty: 0, rt: l.tax_rate, txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 };
       cur.qty = r2(cur.qty + sign * l.qty);
       cur.txval = r2(cur.txval + sign * l.taxable * ex);
       cur.iamt = r2(cur.iamt + sign * l.igst * ex);

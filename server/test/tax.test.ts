@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { computeTaxLine, computeTds, gstSetOff, supplyKind } from '../src/tax.js';
 import { amountInWords, fiscalYear, makeGstin, validateGstin } from '../src/util.js';
-import { ewayValidity } from '../src/documents/actions.js';
+import { ewayValidity } from '../src/einvoice.js';
 
 describe('GST computation', () => {
   it('splits intra-state tax into equal CGST and SGST', () => {

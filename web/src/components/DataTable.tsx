@@ -35,7 +35,8 @@ export function DataTable<T extends Record<string, any>>({ cols, rows, onRow, em
           <thead><tr>{cols.map((c) => <th key={c.key} className={`${c.num ? 'num' : ''} ${c.className ?? ''}`}>{c.label}</th>)}</tr></thead>
           <tbody>
             {rows.map((r, i) => (
-              <tr key={r.id ?? i} className={onRow ? 'cursor-pointer' : ''} onClick={() => onRow?.(r)}>
+              <tr key={r.id ?? i} className={onRow ? 'cursor-pointer focus:bg-brand-50 focus:outline-none' : ''} onClick={() => onRow?.(r)}
+                tabIndex={onRow ? 0 : undefined} onKeyDown={onRow ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRow(r); } } : undefined}>
                 {cols.map((c) => <td key={c.key} className={`${c.num ? 'num' : ''} ${c.className ?? ''}`}>{c.render ? c.render(r) : r[c.key] ?? '-'}</td>)}
               </tr>
             ))}

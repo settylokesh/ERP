@@ -1,9 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as acc from './accountant.js';
 import { ACCOUNT_TYPES } from './ledger.js';
-import { assertCan, authMiddleware, can, DEFAULT_ROLES, hashPassword, login, logout, MODULES, type PermModule } from './auth.js';
+import { assertCan, assertCanAny, assertPasswordStrength, authMiddleware, can, changePassword, DEFAULT_ROLES, hashPassword, login, logout, MODULES, type PermModule } from './auth.js';
 import * as bank from './banking.js';
 import * as custom from './custom.js';
 import { dashboard, globalSearch, runRecurring, saveRecurring } from './dashboard.js';
@@ -11,6 +13,8 @@ import { db, fail, HttpError, json, type Row } from './db.js';
 import { runAction, availableActions } from './documents/actions.js';
 import { assertDocPerm, convertDraft, createDocument, createFrom, deleteDocument, getDocument, listDocuments, updateDocument } from './documents/engine.js';
 import { DOC_TYPES, docType } from './documents/types.js';
+import { postItemOpening } from './documents/posting.js';
+import { einvoicePayload, ewaybillBulkFile, ewaybillPayload, GST_DOC_NUMBER } from './einvoice.js';
 import * as gst from './gst.js';
 import { availableBatches, availableSerials } from './inventory.js';
 import * as mfg from './manufacturing.js';
@@ -18,10 +22,12 @@ import * as m from './masters.js';
 import * as pay from './payments.js';
 import * as payroll from './payroll.js';
 import { reportCatalog, runReport, toCsv } from './reports.js';
-import { DEFAULT_ORG, DEFAULT_PAYROLL, getKv, LOCK_MODULES, org, payrollSettings, setKv } from './settings.js';
-import { GST_TREATMENTS, STATES, today, validateGstin } from './util.js';
+import { assertUnlocked, DEFAULT_PAYROLL, DEFAULT_SEQUENCES, getKv, LOCK_MODULES, org, payrollSettings, setKv, validateOrgProfile } from './settings.js';
+import { checkSetupToken, completeSetup, needsSetup } from './seed.js';
+import { LATEST_VERSION, schemaVersion } from './migrations.js';
+import { GST_TREATMENTS, isDate, isEmail, STATES, today } from './util.js';
 import { parseCsv } from './banking.js';
-import { audit } from './activity.js';
+import { audit, emailConfigured, retryEmails } from './activity.js';
 
 type H = (req: Request, res: Response) => unknown;
 const h = (fn: H) => (req: Request, res: Response, next: NextFunction) => {
@@ -40,27 +46,61 @@ const id = (req: Request) => {
   if (!Number.isInteger(n) || n <= 0) fail('Invalid id', 400);
   return n;
 };
+/** Users, roles and backups can change who has access to everything, so they are limited to administrators. */
+const adminOnly = (req: Request, _res: Response, next: NextFunction) => {
+  try { if (!req.user?.is_admin) fail('Only administrators can do this', 403); next(); } catch (e) { next(e); }
+};
+/** Item prices, batches and serials are looked up from sales, purchase, inventory and manufacturing screens. */
+const itemLookup = (req: Request, _res: Response, next: NextFunction) => {
+  try { assertCanAny(req.user, ['items', 'sales', 'purchases', 'inventory', 'manufacturing']); next(); } catch (e) { next(e); }
+};
+/** GST return period (YYYY-MM), defaulting to the current month. */
+const periodParam = (v: unknown) => {
+  const p = String(v ?? today().slice(0, 7));
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) fail('Period must be YYYY-MM', 422);
+  return p;
+};
+const attachment = (res: Response, filename: string) => res.setHeader('content-disposition', `attachment; filename="${filename.replace(/[^A-Za-z0-9._-]/g, '_')}"`);
+
+/** Conservative security headers for the API and the single-page app. */
+function securityHeaders(_req: Request, res: Response, next: NextFunction) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  next();
+}
 
 export function createApp() {
   const app = express();
+  app.disable('x-powered-by');
+  // Behind a reverse proxy set TRUST_PROXY (e.g. "1" or "loopback") so client IPs are read from X-Forwarded-For.
+  if (process.env.TRUST_PROXY) app.set('trust proxy', /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
+  app.use(securityHeaders);
   app.use(express.json({ limit: '10mb' }));
   app.use(express.text({ type: ['text/csv', 'text/plain'], limit: '10mb' }));
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
-  app.post('/api/auth/login', h((req) => login(req.body?.email, req.body?.password)));
+  app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), schema_version: schemaVersion(db()) }));
+  app.post('/api/auth/login', h((req) => login(req.body?.email, req.body?.password, req.ip ?? '')));
+
+  // First-run setup: available only until the first administrator exists.
+  app.get('/api/setup', h(() => ({ needs_setup: needsSetup(), states: STATES })));
+  app.post('/api/setup', h((req) => {
+    if (!needsSetup()) fail('Setup has already been completed. Sign in instead.', 409);
+    checkSetupToken(req.body?.setup_code);
+    const admin = req.body?.admin ?? {};
+    completeSetup({ organisation: req.body?.organisation ?? {}, admin });
+    return login(admin.email, admin.password, req.ip ?? '');
+  }));
 
   const api = express.Router();
   api.use(authMiddleware);
 
   api.post('/auth/logout', h((req) => logout(req.token!)));
   api.get('/auth/me', h((req) => ({ user: req.user, org: org() })));
-  api.post('/auth/password', h((req) => {
-    const { current, next } = req.body ?? {};
-    const u = db().get<Row>('SELECT * FROM users WHERE id = ?', req.user!.id)!;
-    login(u.email, current);
-    if (String(next ?? '').length < 8) fail('New password must be at least 8 characters', 422);
-    db().update('users', u.id, { password_hash: hashPassword(next) });
-  }));
+  api.post('/auth/password', h((req) => changePassword(req.user!.id, req.body?.current, req.body?.next, req.token!)));
 
   api.get('/meta', h((req) => ({
     user: req.user,
@@ -130,11 +170,21 @@ export function createApp() {
     assertCan(req.user, contactModule(c.kind), 'delete');
     m.deleteContact(id(req), req.user);
   }));
-  api.get('/contacts/:id/statement', h((req) => m.contactStatement(id(req), String(req.query.from ?? `${today().slice(0, 4)}-04-01`), String(req.query.to ?? today()))));
-  api.get('/contacts/:id/open-documents', h((req) => pay.openDocumentsFor(id(req), req.query.kind === 'made' ? 'made' : 'received')));
+  const contactKind = (req: Request) => (db().get<Row>('SELECT kind FROM contacts WHERE id = ?', id(req)) ?? fail('Contact not found', 404)).kind as 'customer' | 'vendor';
+  api.get('/contacts/:id/statement', h((req) => {
+    assertCan(req.user, contactModule(contactKind(req)));
+    const from = String(req.query.from || `${today().slice(0, 4)}-04-01`), to = String(req.query.to || today());
+    if (!isDate(from) || !isDate(to)) fail('Statement dates must be YYYY-MM-DD', 422);
+    return m.contactStatement(id(req), from, to);
+  }));
+  api.get('/contacts/:id/open-documents', h((req) => {
+    assertCan(req.user, contactModule(contactKind(req)));
+    return pay.openDocumentsFor(id(req), req.query.kind === 'made' ? 'made' : 'received');
+  }));
   api.get('/contacts/:id/credits', h((req) => {
-    const c = db().get<Row>('SELECT kind FROM contacts WHERE id = ?', id(req)) ?? fail('Contact not found', 404);
-    return pay.availableCredits(id(req), c.kind);
+    const kind = contactKind(req);
+    assertCan(req.user, contactModule(kind));
+    return pay.availableCredits(id(req), kind);
   }));
 
   // ---------- Items ----------
@@ -158,9 +208,9 @@ export function createApp() {
   api.get('/items/:id', perm('items'), h((req) => m.getItem(id(req))));
   api.put('/items/:id', perm('items', 'edit'), h((req) => ({ id: m.saveItem(req.body, req.user, id(req)) })));
   api.delete('/items/:id', perm('items', 'delete'), h((req) => m.deleteItem(id(req), req.user)));
-  api.get('/items/:id/price', h((req) => ({ rate: m.priceFor(id(req), req.query.price_list_id ? Number(req.query.price_list_id) : null, req.query.side === 'purchase' ? 'purchase' : 'sales') })));
-  api.get('/items/:id/batches', h((req) => availableBatches(id(req), Number(req.query.warehouse_id))));
-  api.get('/items/:id/serials', h((req) => availableSerials(id(req), Number(req.query.warehouse_id))));
+  api.get('/items/:id/price', itemLookup, h((req) => ({ rate: m.priceFor(id(req), req.query.price_list_id ? Number(req.query.price_list_id) : null, req.query.side === 'purchase' ? 'purchase' : 'sales') })));
+  api.get('/items/:id/batches', itemLookup, h((req) => availableBatches(id(req), Number(req.query.warehouse_id))));
+  api.get('/items/:id/serials', itemLookup, h((req) => availableSerials(id(req), Number(req.query.warehouse_id))));
 
   // ---------- Chart of accounts & masters ----------
   api.get('/accounts', h((req) => m.listAccounts(req.query as Row)));
@@ -232,6 +282,26 @@ export function createApp() {
     if (req.params.to === 'purchase_receive') mfg.ensureReceiveInspections(newId, req.user);
     return { id: newId, type: req.params.to };
   }));
+
+  // ---------- GST e-invoice and e-way bill files ----------
+  api.get('/docs/:type/:id/einvoice.json', (req, res, next) => {
+    try {
+      loadTyped(req);
+      assertDocPerm(req.user, req.params.type, 'view');
+      const { document, payload } = einvoicePayload(id(req));
+      attachment(res, `einvoice_${document.number}.json`);
+      res.json(payload);
+    } catch (e) { next(e); }
+  });
+  api.post('/docs/:type/:id/ewaybill.json', (req, res, next) => {
+    try {
+      loadTyped(req);
+      assertDocPerm(req.user, req.params.type, 'view');
+      const { document, entry } = ewaybillPayload(id(req), req.body ?? {});
+      attachment(res, `ewaybill_${document.number}.json`);
+      res.json(ewaybillBulkFile([entry]));
+    } catch (e) { next(e); }
+  });
 
   // ---------- Payments, credits, refunds ----------
   const payModule = (kind: string): PermModule => (kind === 'made' ? 'purchases' : 'sales');
@@ -384,18 +454,39 @@ export function createApp() {
   api.post('/payroll/payslips/:id/release', perm('payroll', 'edit'), h((req) => { payroll.releaseWithheld(id(req), req.body ?? {}, req.user); return payroll.getPayslip(id(req)); }));
 
   // ---------- GST compliance ----------
-  api.get('/gst/gstr1', perm('compliance'), h((req) => gst.gstr1(String(req.query.period ?? today().slice(0, 7)))));
+  api.get('/gst/gstr1', perm('compliance'), h((req) => gst.gstr1(periodParam(req.query.period))));
   api.get('/gst/gstr1/json', perm('compliance'), (req, res, next) => {
     try {
-      const r = gst.gstr1(String(req.query.period ?? today().slice(0, 7)));
-      res.setHeader('content-disposition', `attachment; filename="GSTR1_${r.gstin}_${r.period}.json"`);
+      const r = gst.gstr1(periodParam(req.query.period));
+      attachment(res, `GSTR1_${r.gstin}_${r.period}.json`);
       res.json(r.json);
     } catch (e) { next(e); }
   });
-  api.get('/gst/gstr3b', perm('compliance'), h((req) => gst.gstr3b(String(req.query.period ?? today().slice(0, 7)))));
-  api.post('/gst/gstr2b/reconcile', perm('compliance', 'edit'), h((req) => gst.reconcile2b(String(req.body.period), req.body.entries ?? [])));
+  api.get('/gst/gstr3b', perm('compliance'), h((req) => gst.gstr3b(periodParam(req.query.period))));
+  api.post('/gst/gstr2b/reconcile', perm('compliance', 'edit'), h((req) => gst.reconcile2b(periodParam(req.body?.period), req.body?.entries ?? [])));
+  // Bulk e-invoice file: a JSON array of IRN requests. With ?check=1 it returns which documents are ready and what is
+  // missing on the others, so one incomplete document does not block the rest.
+  api.post('/gst/einvoice-export', perm('compliance'), (req, res, next) => {
+    try {
+      const ids: number[] = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n: number) => Number.isInteger(n) && n > 0);
+      if (!ids.length) fail('Choose at least one document', 422);
+      if (ids.length > 500) fail('Export at most 500 documents at a time', 422);
+      const ready: Row[] = [];
+      const problems: Row[] = [];
+      for (const docId of ids) {
+        try { ready.push({ id: docId, ...einvoicePayload(docId) }); } catch (e: any) {
+          if (!(e instanceof HttpError)) throw e;
+          problems.push({ id: docId, number: db().value('SELECT number FROM documents WHERE id = ?', docId), error: e.message });
+        }
+      }
+      if (req.query.check) return res.json({ ready: ready.map((r) => ({ id: r.id, number: r.document.number })), problems });
+      if (!ready.length) fail(`None of the selected documents can be exported:\n${problems.map((p) => `${p.number}: ${p.error}`).join('\n')}`, 422);
+      attachment(res, `einvoices_${today()}.json`);
+      res.json(ready.map((r) => r.payload));
+    } catch (e) { next(e); }
+  });
   api.get('/gst/einvoices', perm('compliance'), h(() => db().all<Row>(
-    `SELECT d.id, d.type, d.number, d.date, d.total, c.name AS contact_name, c.gstin, json_extract(d.data,'$.einvoice.status') AS einvoice_status, json_extract(d.data,'$.einvoice.irn') AS irn,
+    `SELECT d.id, d.type, d.number, d.date, d.total, c.name AS contact_name, c.gstin, c.gst_treatment, json_extract(d.data,'$.einvoice.status') AS einvoice_status, json_extract(d.data,'$.einvoice.irn') AS irn,
             json_extract(d.data,'$.einvoice.ack_no') AS ack_no, json_extract(d.data,'$.ewaybill.status') AS ewaybill_status, json_extract(d.data,'$.ewaybill.ewb_no') AS ewb_no,
             json_extract(d.data,'$.ewaybill.valid_until') AS ewb_valid_until
      FROM documents d JOIN contacts c ON c.id = d.contact_id WHERE d.type IN ('invoice','credit_note','delivery_challan') AND d.status NOT IN ('draft','void') ORDER BY d.date DESC LIMIT 500`)));
@@ -408,7 +499,7 @@ export function createApp() {
       const r = runReport(key, req.query as Row);
       if (req.params.key.endsWith('.csv')) {
         res.setHeader('content-type', 'text/csv; charset=utf-8');
-        res.setHeader('content-disposition', `attachment; filename="${key}.csv"`);
+        attachment(res, `${key}.csv`);
         res.send(toCsv(r));
       } else res.json(r);
     } catch (e) { next(e); }
@@ -425,7 +516,13 @@ export function createApp() {
   api.get('/custom-modules', h(() => custom.listCustomModules()));
   api.post('/custom-modules', perm('settings', 'edit'), h((req) => ({ id: custom.saveCustomModule(req.body, req.user) })));
   api.put('/custom-modules/:id', perm('settings', 'edit'), h((req) => ({ id: custom.saveCustomModule(req.body, req.user, id(req)) })));
-  api.delete('/custom-modules/:id', perm('settings', 'edit'), h((req) => db().run('DELETE FROM custom_modules WHERE id = ?', id(req)) && { ok: true }));
+  api.delete('/custom-modules/:id', perm('settings', 'edit'), h((req) => db().tx(() => {
+    const mod = db().get<Row>('SELECT * FROM custom_modules WHERE id = ?', id(req)) ?? fail('Custom module not found', 404);
+    db().run('DELETE FROM custom_modules WHERE id = ?', mod.id);
+    db().run('DELETE FROM sequences WHERE type = ?', `custom:${mod.key}`);
+    audit('custom_module', mod.id, 'deleted', `Custom module ${mod.name} deleted`, req.user);
+    return { ok: true };
+  })));
   api.get('/custom/:key', perm('custom'), h((req) => custom.listCustomRecords(req.params.key, req.query as Row)));
   api.post('/custom/:key', perm('custom', 'create'), h((req) => ({ id: custom.saveCustomRecord(req.params.key, req.body ?? {}, req.user) })));
   api.get('/custom/:key/:id', perm('custom'), h((req) => {
@@ -439,17 +536,19 @@ export function createApp() {
   // ---------- Settings ----------
   api.get('/settings/org', h(() => org()));
   api.put('/settings/org', perm('settings', 'edit'), h((req) => {
-    const next = { ...org(), ...req.body };
-    if (!STATES[next.state_code]) fail('Invalid state', 422);
-    if (!['fifo', 'wac'].includes(next.valuation_method)) fail('Invalid valuation method', 422);
-    if (next.gstin) {
-      const err = validateGstin(next.gstin);
-      if (err) fail(err, 422);
-      if (next.gstin.slice(0, 2) !== next.state_code) fail('GSTIN state code does not match the organisation state', 422);
-    }
-    if (next.valuation_method !== org().valuation_method && db().get("SELECT 1 FROM stock_moves WHERE source_type <> 'item_opening'")) fail('Valuation method cannot change after stock transactions exist', 422);
-    for (const k of Object.keys(next)) if (!(k in DEFAULT_ORG)) delete (next as Row)[k];
-    setKv('org', next);
+    const prev = org();
+    const next = validateOrgProfile({ ...prev, ...req.body, setup_complete: prev.setup_complete });
+    if (next.valuation_method !== prev.valuation_method && db().get("SELECT 1 FROM stock_moves WHERE source_type <> 'item_opening'")) fail('Valuation method cannot change after stock transactions exist', 422);
+    db().tx(() => {
+      setKv('org', next);
+      if (next.inventory_start_date !== prev.inventory_start_date) {
+        // Opening stock and opening balances are dated on this day: move them with it.
+        if (isDate(prev.inventory_start_date)) assertUnlocked('inventory', prev.inventory_start_date, 'opening balance');
+        assertUnlocked('inventory', next.inventory_start_date, 'opening balance');
+        for (const it of db().all<Row>("SELECT id FROM items WHERE opening_stock IS NOT NULL AND opening_stock NOT IN ('', '[]')")) postItemOpening(it.id);
+        for (const c of db().all<Row>('SELECT id FROM contacts WHERE opening_balance <> 0')) m.postContactOpening(c.id);
+      }
+    });
     audit('settings', null, 'updated', 'Organisation profile updated', req.user);
     return next;
   }));
@@ -489,39 +588,64 @@ export function createApp() {
   }));
   api.get('/settings/sequences', h(() => db().all('SELECT * FROM sequences ORDER BY type')));
   api.put('/settings/sequences/:type', perm('settings', 'edit'), h((req) => {
+    const type = req.params.type;
+    if (!DEFAULT_SEQUENCES[type] && !type.startsWith('custom:')) fail('Unknown numbering series', 404);
     const { prefix, next_no, padding } = req.body ?? {};
-    if (!(Number(next_no) >= 1)) fail('Next number must be at least 1', 422);
+    const pfx = String(prefix ?? '');
+    const nextNo = Number(next_no);
+    const pad = Math.min(10, Math.max(1, Number(padding) || 5));
+    if (!Number.isInteger(nextNo) || nextNo < 1) fail('Next number must be a whole number of at least 1', 422);
+    if (pfx.length > 12 || /[\s"'<>]/.test(pfx)) fail('Prefix can have up to 12 characters and no spaces or quotes', 422);
+    // GST rule 46: invoice-type numbers are at most 16 characters of letters, digits, '-' and '/'.
+    if (['invoice', 'credit_note', 'delivery_challan', 'retainer_invoice'].includes(type) && !GST_DOC_NUMBER.test(`${pfx}${String(nextNo).padStart(pad, '0')}`)) {
+      fail("GST documents need numbers of at most 16 characters using letters, digits, '-' and '/'", 422);
+    }
     db().run('INSERT INTO sequences (type, prefix, next_no, padding) VALUES (?,?,?,?) ON CONFLICT(type) DO UPDATE SET prefix = excluded.prefix, next_no = excluded.next_no, padding = excluded.padding',
-      req.params.type, String(prefix ?? ''), Number(next_no), Math.min(10, Math.max(1, Number(padding) || 5)));
+      type, pfx, nextNo, pad);
   }));
-  api.get('/settings/users', perm('settings'), h(() => db().all('SELECT u.id, u.name, u.email, u.role_id, u.is_active, u.created_at, r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id ORDER BY u.name')));
-  api.post('/settings/users', perm('settings', 'edit'), h((req) => {
-    const { name, email, password, role_id } = req.body ?? {};
-    if (!name || !/^[^\s@]+@[^\s@]+$/.test(email ?? '')) fail('Name and a valid email are required', 422);
-    if (String(password ?? '').length < 8) fail('Password must be at least 8 characters', 422);
-    if (!db().get('SELECT 1 FROM roles WHERE id = ?', role_id)) fail('Role not found', 422);
+  api.get('/settings/users', perm('settings'), h(() => db().all('SELECT u.id, u.name, u.email, u.role_id, u.is_active, u.created_at, u.last_login_at, r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id ORDER BY u.name')));
+  api.post('/settings/users', adminOnly, h((req) => {
+    const { name, password } = req.body ?? {};
+    const role_id = Number(req.body?.role_id);
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    if (!String(name ?? '').trim() || !isEmail(email)) fail('Name and a valid email are required', 422);
+    assertPasswordStrength(password);
+    if (!Number.isInteger(role_id) || !db().get('SELECT 1 FROM roles WHERE id = ?', role_id)) fail('Role not found', 422);
     if (db().get('SELECT 1 FROM users WHERE email = ?', email)) fail('A user with this email already exists', 409);
-    return { id: db().insert('users', { name, email, password_hash: hashPassword(password), role_id }) };
+    // The administrator chose this password, so the user replaces it at first sign-in.
+    const uid = db().insert('users', { name: String(name).trim(), email, password_hash: hashPassword(password), role_id, must_change_password: 1 });
+    audit('user', uid, 'created', `User ${email} created`, req.user);
+    return { id: uid };
   }));
-  api.put('/settings/users/:id', perm('settings', 'edit'), h((req) => {
+  api.put('/settings/users/:id', adminOnly, h((req) => db().tx(() => {
     const b = req.body ?? {};
+    const target = db().get<Row>('SELECT u.*, r.is_admin FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?', id(req)) ?? fail('User not found', 404);
     if (id(req) === req.user!.id && b.is_active === false) fail('You cannot deactivate yourself', 422);
-    if (b.role_id && !db().get('SELECT 1 FROM roles WHERE id = ?', b.role_id)) fail('Role not found', 422);
-    db().update('users', id(req), { name: b.name, role_id: b.role_id, is_active: b.is_active === undefined ? undefined : b.is_active ? 1 : 0, password_hash: b.password ? hashPassword(b.password) : undefined });
-    if (b.is_active === false) db().run('DELETE FROM sessions WHERE user_id = ?', id(req));
-  }));
+    const roleId = b.role_id == null || b.role_id === '' ? undefined : Number(b.role_id);
+    if (roleId !== undefined && (!Number.isInteger(roleId) || !db().get('SELECT 1 FROM roles WHERE id = ?', roleId))) fail('Role not found', 422);
+    if (b.password) assertPasswordStrength(b.password);
+    db().update('users', target.id, {
+      name: b.name ? String(b.name).trim() : undefined, role_id: roleId, is_active: b.is_active === undefined ? undefined : b.is_active ? 1 : 0,
+      password_hash: b.password ? hashPassword(b.password) : undefined, must_change_password: b.password && target.id !== req.user!.id ? 1 : undefined,
+    });
+    if (!db().get('SELECT 1 FROM users u JOIN roles r ON r.id = u.role_id WHERE r.is_admin = 1 AND u.is_active = 1')) fail('At least one active administrator is required', 422);
+    // Deactivation, a role change or a password reset signs the user out everywhere.
+    if (b.is_active === false || (roleId !== undefined && roleId !== target.role_id) || b.password) db().run('DELETE FROM sessions WHERE user_id = ?', target.id);
+    audit('user', target.id, 'updated', `User ${target.email} updated`, req.user);
+    return { ok: true };
+  })));
   api.get('/settings/roles', h(() => db().all<Row>('SELECT * FROM roles ORDER BY id').map((r) => ({ ...r, permissions: json(r.permissions, {}), users: db().value('SELECT COUNT(*) FROM users WHERE role_id = ?', r.id) }))));
-  api.post('/settings/roles', perm('settings', 'edit'), h((req) => {
+  api.post('/settings/roles', adminOnly, h((req) => {
     const name = String(req.body?.name ?? '').trim() || fail('Role name is required', 422);
     if (db().get('SELECT 1 FROM roles WHERE name = ?', name)) fail('Role already exists', 409);
     return { id: db().insert('roles', { name, description: req.body.description ?? null, permissions: JSON.stringify(req.body.permissions ?? {}) }) };
   }));
-  api.put('/settings/roles/:id', perm('settings', 'edit'), h((req) => {
+  api.put('/settings/roles/:id', adminOnly, h((req) => {
     const r = db().get<Row>('SELECT * FROM roles WHERE id = ?', id(req)) ?? fail('Role not found', 404);
     if (r.is_admin) fail('The Admin role cannot be changed', 422);
     db().update('roles', id(req), { name: req.body.name ?? r.name, description: req.body.description ?? r.description, permissions: JSON.stringify(req.body.permissions ?? json(r.permissions, {})) });
   }));
-  api.delete('/settings/roles/:id', perm('settings', 'edit'), h((req) => {
+  api.delete('/settings/roles/:id', adminOnly, h((req) => {
     const r = db().get<Row>('SELECT * FROM roles WHERE id = ?', id(req)) ?? fail('Role not found', 404);
     if (r.is_admin) fail('The Admin role cannot be deleted', 422);
     if (db().get('SELECT 1 FROM users WHERE role_id = ?', id(req))) fail('Reassign the users of this role first', 422);
@@ -536,9 +660,36 @@ export function createApp() {
   api.put('/settings/workflows/:id', perm('settings', 'edit'), h((req) => ({ id: custom.saveWorkflow(req.body, id(req)) })));
   api.delete('/settings/workflows/:id', perm('settings', 'edit'), h((req) => db().run('DELETE FROM workflow_rules WHERE id = ?', id(req)) && { ok: true }));
   api.get('/settings/workflow-log', perm('settings'), h(() => db().all('SELECT l.*, w.name FROM workflow_log l LEFT JOIN workflow_rules w ON w.id = l.rule_id ORDER BY l.id DESC LIMIT 300')));
-  api.get('/settings/email-log', perm('settings'), h(() => db().all('SELECT * FROM email_outbox ORDER BY id DESC LIMIT 300')));
+  api.get('/settings/email-log', perm('settings'), h(() => ({ configured: emailConfigured(), rows: db().all('SELECT * FROM email_outbox ORDER BY id DESC LIMIT 300') })));
+  api.post('/settings/email-log/retry', perm('settings', 'edit'), h((req) => {
+    if (!emailConfigured()) fail('Email delivery is not configured. Set SMTP_HOST (and SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM) on the server.', 422);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number) : undefined;
+    return { retried: retryEmails(ids) };
+  }));
   api.get('/settings/default-roles', perm('settings'), h(() => DEFAULT_ROLES));
   api.get('/permissions/check', h((req) => ({ allowed: can(req.user, String(req.query.module), (req.query.action as any) ?? 'view') })));
+
+  // ---------- Administration ----------
+  api.get('/admin/system', adminOnly, h(() => ({
+    schema_version: schemaVersion(db()), latest_schema_version: LATEST_VERSION, node: process.version,
+    users: db().value('SELECT COUNT(*) FROM users'), documents: db().value('SELECT COUNT(*) FROM documents'), journals: db().value('SELECT COUNT(*) FROM journals'),
+  })));
+  // Consistent online backup: SQLite's VACUUM INTO writes a compact copy of the live database, which is streamed back.
+  api.get('/admin/backup', adminOnly, (req, res, next) => {
+    let dir: string | null = null;
+    try {
+      dir = mkdtempSync(path.join(tmpdir(), 'saral-backup-'));
+      const file = path.join(dir, 'backup.db');
+      db().raw.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+      audit('settings', null, 'backup', 'Database backup downloaded', req.user);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const cleanup = () => { if (dir) rmSync(dir, { recursive: true, force: true }); };
+      res.download(file, `saral-backup-${stamp}.db`, (err) => { cleanup(); if (err && !res.headersSent) next(err); });
+    } catch (e) {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      next(e);
+    }
+  });
 
   app.use('/api', api);
 
@@ -551,11 +702,20 @@ export function createApp() {
     app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   }
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
+
+  // Errors: expected ones (HttpError, body parsing) return their message; anything else is logged with a reference id and
+  // the client gets a generic message, so internals never leak.
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     void _next;
-    const status = err instanceof HttpError ? err.status : err?.status ?? (err?.type === 'entity.parse.failed' ? 400 : 500);
-    if (status >= 500) console.error(err);
-    res.status(status).json({ error: status >= 500 && !(err instanceof HttpError) ? `Internal error: ${err?.message ?? err}` : err.message, details: err?.details });
+    const status = err instanceof HttpError ? err.status : Number(err?.status ?? err?.statusCode) || 500;
+    if (status >= 500 && !(err instanceof HttpError)) {
+      const ref = randomUUID().slice(0, 8);
+      console.error(`[${ref}] ${req.method} ${req.originalUrl}`, err);
+      return res.status(500).json({ error: `Something went wrong. Reference: ${ref}` });
+    }
+    const message = err instanceof HttpError ? err.message : err?.type === 'entity.parse.failed' ? 'Request body is not valid JSON' : err?.type === 'entity.too.large' ? 'Request is too large' : err?.message ?? 'Request failed';
+    res.status(status).json({ error: message, details: err?.details });
   });
   return app;
 }

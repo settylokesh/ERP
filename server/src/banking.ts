@@ -1,7 +1,7 @@
 import { audit } from './activity.js';
 import type { AuthUser } from './auth.js';
 import { db, fail, type Row } from './db.js';
-import { accountBalance, replaceJournal } from './ledger.js';
+import { accountBalance, assertNotReconciled, replaceJournal } from './ledger.js';
 import { createPayment } from './payments.js';
 import { assertUnlocked, nextNumber } from './settings.js';
 import { addDays, isDate, r2, today } from './util.js';
@@ -55,7 +55,7 @@ export function saveBankTransaction(input: Row, user?: AuthUser, id?: number) {
     if (id) {
       const ex = d.get<Row>('SELECT * FROM bank_transactions WHERE id = ?', id) ?? fail('Transaction not found', 404);
       assertUnlocked('banking', ex.date, 'bank transaction');
-      if (d.get("SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = 'bank_txn' AND j.source_id = ? AND jl.recon_id IS NOT NULL", id)) fail('Undo the reconciliation before editing', 422);
+      assertNotReconciled('bank_txn', id, 'edit');
       d.update('bank_transactions', id, row);
     } else tid = d.insert('bank_transactions', { ...row, number: nextNumber('bank_txn') });
     replaceJournal('bank_txn', tid!, {
@@ -74,9 +74,8 @@ export function deleteBankTransaction(id: number, user?: AuthUser) {
     const d = db();
     const t = d.get<Row>('SELECT * FROM bank_transactions WHERE id = ?', id) ?? fail('Transaction not found', 404);
     assertUnlocked('banking', t.date, 'bank transaction');
-    if (d.get("SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = 'bank_txn' AND j.source_id = ? AND jl.recon_id IS NOT NULL", id)) fail('Undo the reconciliation before deleting', 422);
+    assertNotReconciled('bank_txn', id, 'delete');
     replaceJournal('bank_txn', id, null);
-    d.run("UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL WHERE matched_source_type = 'bank_txn' AND matched_source_id = ?", id);
     d.run('DELETE FROM bank_transactions WHERE id = ?', id);
     audit('bank_txn', id, 'deleted', `Bank transaction ${t.number} deleted`, user);
   });

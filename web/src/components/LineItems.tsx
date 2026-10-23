@@ -148,7 +148,7 @@ export function LineItems({ type, lines, setLines, priced, side, kind, inclusive
             const needsTracking = it && it.tracking !== 'none' && it.track_inventory;
             return (
               <tr key={i}>
-                <td className="pt-3 text-slate-400">{i + 1}</td>
+                <td className="pt-3 text-slate-500">{i + 1}</td>
                 <td>
                   {expenseOnly || (!l.item_id && l.account_id) ? (
                     <AccountPicker value={l.account_id} onChange={(v) => update(i, { account_id: v, item_id: null })} categories={side === 'sales' ? ['income'] : ['expense', 'asset']} placeholder="Select an account" />
