@@ -1,0 +1,17 @@
+{
+  "name": "saral-erp",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Saral ERP - an open-source, full-stack ERP modelled on the feature set of Zoho ERP (finance, GST compliance, inventory, sales, procurement, manufacturing, payroll).",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "dev": "npm run dev --workspace server & npm run dev --workspace web",
+    "build": "npm run build --workspace web && npm run build --workspace server",
+    "start": "npm run start --workspace server",
+    "seed": "npm run seed --workspace server",
+    "test": "npm test --workspace server",
+    "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace web",
+    "e2e": "npm run e2e --workspace web"
+  }
+}
