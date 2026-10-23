@@ -88,7 +88,7 @@ catch-all route for client-side routing.
 Read these files in order to understand the system in about an hour:
 
 1. `server/src/schema.ts` — every table.
-2. `server/src/db.ts` — the tiny database wrapper and transaction helper.
+2. `server/src/db.ts` — the small database wrapper and transaction helper (drivers in `db-node.ts` / `db-durable.ts`).
 3. `server/src/ledger.ts` — chart of accounts, posting journals.
 4. `server/src/documents/types.ts` — the 18 document types and their statuses.
 5. `server/src/documents/engine.ts` — create/update/convert/void documents.

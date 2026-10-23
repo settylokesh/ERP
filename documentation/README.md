@@ -29,6 +29,7 @@ The code is the final authority. When code and documentation disagree, fix which
 | Work on the web app | [17 Frontend](17-frontend.md) |
 | Write or run tests | [18 Testing](18-testing.md) |
 | Deploy, back up, upgrade or operate a server | [19 Deployment and operations](19-deployment-and-operations.md) |
+| Run it on Cloudflare (Workers + Durable Objects) | [25 Running on Cloudflare](25-cloudflare.md) |
 | Review security controls | [20 Security](20-security.md) |
 | Add a document type, report, migration or module | [21 Extending the system](21-extending.md) |
 | Check a statutory rate or rule and its source | [22 Statutory reference](22-statutory-reference.md) |

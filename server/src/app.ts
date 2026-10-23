@@ -1,7 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import * as acc from './accountant.js';
 import { ACCOUNT_TYPES } from './ledger.js';
@@ -25,6 +24,7 @@ import { reportCatalog, runReport, toCsv } from './reports.js';
 import { assertUnlocked, DEFAULT_PAYROLL, DEFAULT_SEQUENCES, getKv, LOCK_MODULES, org, payrollSettings, setKv, validateOrgProfile } from './settings.js';
 import { checkSetupToken, completeSetup, needsSetup } from './seed.js';
 import { LATEST_VERSION, schemaVersion } from './migrations.js';
+import { runtimeName } from './runtime.js';
 import { GST_TREATMENTS, isDate, isEmail, STATES, today } from './util.js';
 import { parseCsv } from './banking.js';
 import { audit, emailConfigured, retryEmails } from './activity.js';
@@ -671,22 +671,22 @@ export function createApp() {
 
   // ---------- Administration ----------
   api.get('/admin/system', adminOnly, h(() => ({
-    schema_version: schemaVersion(db()), latest_schema_version: LATEST_VERSION, node: process.version,
+    schema_version: schemaVersion(db()), latest_schema_version: LATEST_VERSION, runtime: runtimeName(),
     users: db().value('SELECT COUNT(*) FROM users'), documents: db().value('SELECT COUNT(*) FROM documents'), journals: db().value('SELECT COUNT(*) FROM journals'),
   })));
-  // Consistent online backup: SQLite's VACUUM INTO writes a compact copy of the live database, which is streamed back.
+  // Consistent online backup: a copy of the SQLite file on Node.js (VACUUM INTO), or a SQL dump on Cloudflare.
   api.get('/admin/backup', adminOnly, (req, res, next) => {
-    let dir: string | null = null;
     try {
-      dir = mkdtempSync(path.join(tmpdir(), 'saral-backup-'));
-      const file = path.join(dir, 'backup.db');
-      db().raw.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+      const b = db().backup();
       audit('settings', null, 'backup', 'Database backup downloaded', req.user);
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      const cleanup = () => { if (dir) rmSync(dir, { recursive: true, force: true }); };
-      res.download(file, `saral-backup-${stamp}.db`, (err) => { cleanup(); if (err && !res.headersSent) next(err); });
+      const name = `saral-backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${b.extension}`;
+      if (b.file) {
+        res.download(b.file, name, (err) => { b.cleanup(); if (err && !res.headersSent) next(err); });
+      } else {
+        res.attachment(name).type(b.contentType).send(b.text);
+        b.cleanup();
+      }
     } catch (e) {
-      if (dir) rmSync(dir, { recursive: true, force: true });
       next(e);
     }
   });

@@ -1,9 +1,10 @@
 import { loadUser, type AuthUser } from '../src/auth.js';
-import { db, type Row } from '../src/db.js';
+import { db, type Row, type SqlDriver } from '../src/db.js';
 import { createDocument } from '../src/documents/engine.js';
 import { acct, accountBalance } from '../src/ledger.js';
 import { saveContact, saveItem } from '../src/masters.js';
-import { completeSetup, initDatabase } from '../src/seed.js';
+import { initDatabase } from '../src/db-node.js';
+import { completeSetup, initDatabaseWith } from '../src/seed.js';
 import { setKv, getKv, DEFAULT_ORG } from '../src/settings.js';
 import { makeGstin } from '../src/util.js';
 
@@ -23,8 +24,10 @@ export interface Ctx {
   service: number;
 }
 
-export function fresh(): Ctx {
-  initDatabase(':memory:');
+/** A new organisation with standard masters, on an in-memory database (or on the given driver). */
+export function fresh(driver?: SqlDriver): Ctx {
+  if (driver) initDatabaseWith(driver);
+  else initDatabase(':memory:');
   const d = db();
   const { user_id } = completeSetup({ organisation: { name: 'Test Co', state_code: '29', inventory_start_date: '2026-04-01' }, admin: { name: 'Admin', email: 'admin@example.com', password: 'admin-pass-123' } });
   setKv('org', { ...getKv('org', DEFAULT_ORG), gstin: makeGstin('29', 'AABCT1234Q'), address: 'Industrial Area', city: 'Bengaluru', pincode: '560058' });

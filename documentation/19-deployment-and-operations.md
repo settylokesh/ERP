@@ -1,5 +1,8 @@
 # 19 · Deployment and operations
 
+This chapter covers running the Node.js server (Docker or directly). To run on Cloudflare Workers with a Durable
+Object database instead, see [25 Running on Cloudflare](25-cloudflare.md).
+
 ## Option A: Docker
 
 ```bash

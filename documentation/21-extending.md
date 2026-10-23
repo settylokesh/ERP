@@ -13,13 +13,15 @@ Recipes for the most common changes. Each ends with the tests to add.
      name: 'Item barcode',
      up: (d) => {
        addColumn(d, 'items', 'barcode', 'TEXT');
-       d.raw.exec('CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode)');
+       d.exec('CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode)');
      },
    },
    ```
 3. Never edit or reorder a released migration.
 4. Test: extend `setup.test.ts` ("upgrades a database created by an older version") or add a case that drops the
-   column, resets `user_version`, migrates and asserts the result.
+   column, resets the version with `d.setSchemaVersion(n)`, migrates and asserts the result. Use only SQL that both
+   `node:sqlite` and Durable Object SQLite accept: no `BEGIN`/`SAVEPOINT`/`VACUUM` or `PRAGMA user_version` in
+   migrations (the driver handles transactions and versions).
 
 ## Add a field to an existing record
 

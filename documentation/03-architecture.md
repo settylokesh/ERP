@@ -48,11 +48,15 @@ flowchart TB
 
 | File | Responsibility |
 |---|---|
-| `index.ts` | Process start: open DB, migrations, unattended setup, setup code, hourly jobs, graceful shutdown |
+| `index.ts` | Node.js entry: open the SQLite file, start-up work, hourly timer, HTTP server, graceful shutdown |
+| `worker.ts` | Cloudflare entry: Worker routing `/api` to the `ErpDatabase` Durable Object, which runs the same app and an hourly alarm ([25](25-cloudflare.md)) |
+| `startup.ts` | Start-up work shared by both entries (unattended setup, setup code log, interrupted emails) and `hourlyJobs()` |
+| `runtime.ts` | `onWorkers` flag and runtime name |
 | `app.ts` | Express app: security headers, body parsing, public routes (`/api/health`, `/api/auth/login`, `/api/setup`), authenticated router, static web app, error handler |
-| `db.ts` | `DB` class (prepared-statement cache, `all/get/value/run/insert/update`, nested transactions via savepoints), `HttpError`, `fail()` |
+| `db.ts` | `DB` class (`all/get/value/run/insert/update/tx/backup`) over a `SqlDriver`, `useDatabase()`, `dumpSql()`, `HttpError`, `fail()` |
+| `db-node.ts` / `db-durable.ts` | Drivers: `node:sqlite` file (prepared-statement cache, `BEGIN IMMEDIATE`/savepoints, `PRAGMA user_version`, `VACUUM INTO`) and Durable Object SQLite (`transactionSync`, `_schema_meta`, SQL dump) |
 | `schema.ts` | The full schema as `CREATE … IF NOT EXISTS` |
-| `migrations.ts` | Versioned, idempotent upgrades of existing databases (`PRAGMA user_version`) |
+| `migrations.ts` | Versioned, idempotent upgrades of existing databases (version stored by the driver) |
 | `seed.ts` | `bootstrap()` base configuration, first-run setup, setup code, inventory re-post hook registration |
 | `settings.ts` | Organisation profile, payroll settings, lock dates, numbering series |
 | `auth.ts` | Password hashing, sessions, sign-in throttling, roles and permission checks |
@@ -91,7 +95,8 @@ flowchart TB
 
 ## Transactions and consistency
 
-- `db().tx(fn)` opens `BEGIN IMMEDIATE`, nested calls use `SAVEPOINT`s, any exception rolls back. All multi-step writes
+- `db().tx(fn)` runs `fn` in a transaction (`BEGIN IMMEDIATE` and savepoints on Node.js, `transactionSync()` on Cloudflare);
+  nested calls roll back only their own work, any exception rolls back. All multi-step writes
   (create a document → write lines → post stock → post journal → refresh parents → run workflows) happen inside one.
 - Derived data is always rebuilt from its source:
   - `syncPosting(docId)` deletes and recreates the document's stock moves, revalues the affected items and replaces its
@@ -105,7 +110,8 @@ flowchart TB
 
 ## Background work
 
-The server runs one timer (hourly, plus once at start):
+`hourlyJobs()` (`startup.ts`) runs hourly — from a timer on Node.js (plus once at start) and from the Durable Object
+alarm on Cloudflare:
 
 - `runRecurring()` — generates invoices from due recurring profiles (each profile in its own transaction).
 - `purgeExpiredSessions()` — deletes expired sessions.
@@ -118,6 +124,7 @@ Webhook calls and SMTP sends run asynchronously after the request transaction fi
 | Decision | Why | Trade-off |
 |---|---|---|
 | SQLite via `node:sqlite` | Zero-ops, single file backup, fast for this workload | One writer at a time; vertical scaling only. Module is marked experimental in Node 22 (prints a warning) |
+| Same app on Cloudflare in one Durable Object | Synchronous SQLite API matches the code; no servers to run; durable storage with point-in-time recovery | One object = one writer, like SQLite; needs the Workers Paid plan for CPU time |
 | Generic document engine | 18 document types share validation, numbering, approvals, posting, conversions and UI | Type-specific rules are `if (type === …)` branches in a few places; see [21](21-extending.md) before adding types |
 | Rebuild derived data | Correctness by construction; back-dated entries re-cost later ones | Re-posting large histories costs CPU; acceptable at SMB scale |
 | Store document-specific extras in `documents.data` JSON | Flexible (e-invoice, shipment, challan type…) | Not indexed; query with `json_extract` |

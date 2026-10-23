@@ -40,6 +40,7 @@ Scored as *Priority = (Impact + Risk) × (6 − Effort)*, each 1–5.
 | 10 | Background job queue for long re-valuations and bulk imports | 3 | 2 | 3 | 15 | Keeps requests short on large datasets |
 | 11 | Split `app.ts` routes into per-module routers | 2 | 1 | 2 | 12 | `app.ts` is ~700 lines; easier navigation and ownership |
 | 12 | Multi-organisation support | 4 | 2 | 5 | 6 | Large change (organisation id on every table); only if the business needs it |
+| 13 | Cloudflare: point-in-time restore and SQL-backup import from Settings | 3 | 3 | 2 | 24 | Today recovery on Cloudflare needs a maintenance Worker or moving to a Node.js server ([25](25-cloudflare.md#data-backups-and-recovery)) |
 
 ## Phased plan
 

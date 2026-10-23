@@ -16,7 +16,7 @@ A summary of the controls in place, where they live, and what operators must do.
 | Output | JSON API; React escapes rendered text; CSV exports neutralise spreadsheet formulas | `reports.ts`, `DataTable.tsx` |
 | Headers | CSP (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `Cross-Origin-Opener-Policy`, `Permissions-Policy`; `X-Powered-By` removed | `app.ts` |
 | Errors | Unexpected errors return a generic message and a reference id; details only in server logs | `app.ts` |
-| Outbound calls | Workflow webhooks only to public addresses, checked in the connection's own DNS lookup (no rebinding window), including IPv6 forms that embed IPv4; 10 s timeout, no redirects | `activity.ts` |
+| Outbound calls | Workflow webhooks only to public addresses, checked in the connection's own DNS lookup (no rebinding window), including IPv6 forms that embed IPv4; 10 s timeout, no redirects. On Cloudflare, requests leave through Cloudflare's network, which cannot reach private networks | `activity.ts` |
 | Email | Delivered after the transaction commits; never sent twice; failures recorded | `activity.ts` |
 | Integrity | Transactions for every write; locked periods; reconciled entries protected; audit log of changes | `db.ts`, `settings.ts`, `ledger.ts`, `activity.ts` |
 | Upload size | JSON/CSV bodies limited to 10 MB | `app.ts` |

@@ -1,7 +1,8 @@
 // Starts the API for the Playwright end-to-end tests: a fresh in-memory database, set up through the same first-run
 // setup the product uses, then filled with the sample company fixture.
 import { createApp } from '../src/app.js';
-import { completeSetup, initDatabase } from '../src/seed.js';
+import { initDatabase } from '../src/db-node.js';
+import { completeSetup } from '../src/seed.js';
 import { loadSampleCompany } from './fixtures/sample-company.js';
 
 export const E2E_ADMIN = { name: 'Test Administrator', email: 'admin@example.com', password: 'admin-pass-123' };

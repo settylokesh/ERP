@@ -415,10 +415,10 @@ function System() {
       <ErrorBox error={error} />
       <div className="card p-5">
         <h3 className="mb-2">Backup</h3>
-        <p className="mb-3 text-xs text-slate-600">Downloads a consistent copy of the whole database (all transactions, users and settings) as a single SQLite file. Keep backups somewhere safe and off this server: they contain everything in the system.</p>
+        <p className="mb-3 text-xs text-slate-600">Downloads a consistent copy of the whole database (all transactions, users and settings): a SQLite file, or on Cloudflare a SQL file that the sqlite3 tool can load. Keep backups somewhere safe and off this server: they contain everything in the system.</p>
         <button className="btn btn-primary" disabled={busy} onClick={() => run(() => download('/admin/backup', 'saral-backup.db'), 'Backup downloaded')}>Download backup</button>
       </div>
-      {data && <div className="card p-5"><h3 className="mb-2">System</h3><KeyVal items={[['Database schema version', `${data.schema_version} (latest ${data.latest_schema_version})`], ['Node.js', data.node], ['Users', data.users], ['Transactions', data.documents], ['Journal entries', data.journals]]} /></div>}
+      {data && <div className="card p-5"><h3 className="mb-2">System</h3><KeyVal items={[['Database schema version', `${data.schema_version} (latest ${data.latest_schema_version})`], ['Runtime', data.runtime], ['Users', data.users], ['Transactions', data.documents], ['Journal entries', data.journals]]} /></div>}
     </div>
   );
 }

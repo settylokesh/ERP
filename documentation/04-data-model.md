@@ -142,7 +142,8 @@ Besides the indexes in `schema.ts`, migrations add: `idx_documents_reference`, `
 
 ## Migrations
 
-`PRAGMA user_version` holds the applied version. On start, `bootstrap()` calls `migrate()`, which runs every migration
+The applied version is kept by the database driver: `PRAGMA user_version` on Node.js, the `_schema_meta` row
+`schema_version` on Cloudflare (where the pragma is not allowed). On start, `bootstrap()` calls `migrate()`, which runs every migration
 with a higher version, each in its own transaction. Migrations must be idempotent because a brand-new database already
 has the latest schema from `schema.ts` (and starts at version 0, so all migrations run and find nothing to change).
 
@@ -151,5 +152,5 @@ has the latest schema from `schema.ts` (and starts at version 0, so all migratio
 | 1 | `users.last_login_at`; structured contact addresses; `email_outbox.error/sent_at`; `employees.ytd_*`; `warehouses.city/pincode`; reference and session indexes |
 | 2 | `users.must_change_password`; flags accounts still using a former built-in password; matching/numbering/outbox indexes |
 
-A database newer than the build (higher `user_version`) is refused at start-up. How to add a migration:
+A database newer than the build (higher stored version) is refused at start-up. How to add a migration:
 [21 Extending](21-extending.md#add-a-database-change).

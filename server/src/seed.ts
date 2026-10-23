@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { audit } from './activity.js';
 import { assertPasswordStrength, DEFAULT_ROLES, hashPassword, loadUser } from './auth.js';
-import { db, fail, openDb } from './db.js';
+import { db, fail, useDatabase, type SqlDriver } from './db.js';
 import { postOpeningJournal, repostJournal } from './documents/posting.js';
 import { DOC_TYPES } from './documents/types.js';
 import { setReposter } from './inventory.js';
@@ -72,8 +72,9 @@ export function bootstrap() {
   return getKv('org', DEFAULT_ORG);
 }
 
-export function initDatabase(file: string) {
-  openDb(file);
+/** Opens the database on a driver, brings its schema up to date and loads base settings. */
+export function initDatabaseWith(driver: SqlDriver) {
+  useDatabase(driver);
   bootstrap();
   return db();
 }
@@ -81,13 +82,19 @@ export function initDatabase(file: string) {
 /** True until the first administrator exists. */
 export const needsSetup = () => !db().get('SELECT 1 FROM users');
 
-let setupCode: string | null = null;
 /**
  * One-time code required by POST /api/setup, so that a freshly started server reachable from a network cannot be
- * claimed by whoever finds it first. It is printed to the server log at start-up; set SETUP_TOKEN to choose it.
+ * claimed by whoever finds it first. It is printed to the server log at start-up and kept in the database until setup
+ * is complete, so it stays the same across restarts; set SETUP_TOKEN to choose it.
  */
 export function setupToken(): string {
-  return (setupCode ??= process.env.SETUP_TOKEN || randomBytes(6).toString('hex').toUpperCase().replace(/(.{4})(?=.)/g, '$1-'));
+  if (process.env.SETUP_TOKEN) return process.env.SETUP_TOKEN;
+  let code = getKv<string | null>('setup_code', null);
+  if (!code) {
+    code = randomBytes(6).toString('hex').toUpperCase().replace(/(.{4})(?=.)/g, '$1-');
+    setKv('setup_code', code);
+  }
+  return code;
 }
 export function checkSetupToken(given: unknown) {
   const a = Buffer.from(String(given ?? '').trim().toUpperCase());
@@ -131,6 +138,7 @@ export function completeSetup(input: SetupInput) {
     setKv('org', next);
     d.run('UPDATE warehouses SET state_code = ? WHERE is_primary = 1 AND state_code IS NULL', next.state_code);
     const userId = createAdmin(input.admin ?? ({} as SetupInput['admin']));
+    d.run("DELETE FROM kv WHERE key = 'setup_code'");
     audit('settings', null, 'setup', `Organisation ${name} set up`, loadUser(userId));
     return { org: next, user_id: userId };
   });

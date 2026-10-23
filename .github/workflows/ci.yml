@@ -18,6 +18,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Bundles the Cloudflare Worker (no deployment, no account needed) to catch bundling problems early.
+      - run: npx wrangler deploy --dry-run --outdir worker-dist
+        env:
+          WRANGLER_SEND_METRICS: 'false'
       - run: npx playwright install --with-deps chromium
         working-directory: web
       - run: npm run e2e

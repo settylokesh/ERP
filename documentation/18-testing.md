@@ -2,7 +2,7 @@
 
 ## Backend tests (Vitest)
 
-`npm test` runs `server/test/*.test.ts` (about 125 tests, a few seconds). Each file uses a fresh in-memory database.
+`npm test` runs `server/test/*.test.ts` (about 130 tests, a few seconds). Each file uses a fresh in-memory database.
 
 | File | Covers |
 |---|---|
@@ -12,10 +12,12 @@
 | `inventory.test.ts` | FIFO/average, back-dated re-costing, batches/serials, transfers, adjustments, stock counts, negative stock |
 | `operations.test.ts` | Banking import/match/categorise/reconcile, manual journals, assets and depreciation, manufacturing, payroll |
 | `api.test.ts` | HTTP layer with the sample company: auth, throttling, permissions, admin-only areas, password change, CSV/JSON exports, backups, headers, e-invoice export |
-| `setup.test.ts` | Empty install (no built-in users or data), setup code, setup validation, migrations, forced change of former default passwords |
+| `setup.test.ts` | Empty install (no built-in users or data), setup code (kept until setup completes), setup validation, migrations, forced change of former default passwords |
+| `drivers.test.ts` | The application on the Cloudflare Durable Object driver (over a stand-in with Cloudflare's rules), nested rollback, schema version table, SQL dump backups that restore every row |
 | `hardening.test.ts` | Numbering collisions, custom record numbers, duplicate vendor bills and partial bills from one PO, HSN validation on edit, committed/incoming stock, status rules, bank match release, payment currency (and older payments), payroll TDS projection, pay-run order, recurring-profile failures, sign-in and password-change throttling, shared-address exemption, webhook address checks and pinned connections, price-correction valuation |
 
-Helpers (`test/helpers.ts`): `fresh()` builds a test company (setup, warehouses, taxes, bank, customers in KA/MH,
+Helpers (`test/helpers.ts`): `fresh(driver?)` builds a test company (on an in-memory `node:sqlite` database, or on the
+given driver) (setup, warehouses, taxes, bank, customers in KA/MH,
 consumer, vendors in KA/UP, a stock item and a service) and returns ids; `buy`, `sell`, `bal(key)`, `stock`, `cogsOf`,
 `trialBalanced()`, `inventoryReconciles()`.
 
@@ -52,10 +54,13 @@ payment, and a new user's forced password change. `web/e2e/setup.spec.ts` covers
 ## Continuous integration
 
 `.github/workflows/ci.yml` on every push to `main` and every pull request: `npm ci` → `npm run typecheck` → `npm test`
-→ `npm run build` → install Chromium → `npm run e2e`.
+→ `npm run build` → `wrangler deploy --dry-run` (bundles the Cloudflare Worker) → install Chromium → `npm run e2e`.
 
 ## Manual checks worth doing before a release
 
 - Upgrade a copy of a production database with the new build and compare the trial balance before/after.
 - Export GSTR-1 JSON and an e-invoice JSON for a sample month and validate them with the portals' offline tools.
 - Run an accessibility check (axe) on new screens.
+- For Cloudflare: `npm run cf:dev` on an empty `.wrangler/state`, then complete setup, post a bill, an invoice and a
+  payment, check the trial balance, download a backup, restart `wrangler dev` and confirm the data is still there
+  ([25](25-cloudflare.md#local-development-and-testing)).

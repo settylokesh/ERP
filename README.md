@@ -28,6 +28,18 @@ docker run -d -p 4000:4000 -v saral-data:/data saral-erp
 docker logs <container>        # shows the setup code
 ```
 
+Cloudflare (Workers + a Durable Object holding the SQLite database; needs the Workers Paid plan):
+
+```bash
+npx wrangler login
+npx wrangler secret put SETUP_TOKEN   # the code you will enter on the setup screen
+npm run cf:deploy
+```
+
+Or connect the repository in the Cloudflare dashboard (Workers & Pages → Import a repository) with build command
+`npm run build --workspace web`, so every push to `main` deploys. Details in
+[`documentation/25-cloudflare.md`](documentation/25-cloudflare.md).
+
 ## What it covers
 
 | Area | Highlights |
@@ -61,11 +73,13 @@ Repository layout:
 ```
 server/          API: Express + TypeScript + node:sqlite
   src/           services, document engine, ledger, inventory, GST, payroll, …
+                 index.ts (Node.js entry), worker.ts (Cloudflare entry)
   test/          Vitest suites, sample-company fixture for tests, e2e server
 web/             React + Vite + Tailwind single-page app
   e2e/           Playwright tests
 documentation/   engineering documentation
-Dockerfile       production image
+Dockerfile       production image (Node.js)
+wrangler.jsonc   Cloudflare deployment (Worker, static assets, Durable Object)
 ```
 
 ## Before going live

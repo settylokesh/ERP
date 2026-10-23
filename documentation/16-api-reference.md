@@ -291,5 +291,5 @@ All under `/payroll` (module `payroll`) except where noted.
 | GET | `/settings/workflow-log` | settings:view | Latest 300 |
 | GET | `/settings/email-log` | settings:view | `{ configured, rows }` |
 | POST | `/settings/email-log/retry` | settings:edit | `{ ids? }` → `{ retried }` |
-| GET | `/admin/system` | **admin** | Schema version, counts, Node version |
-| GET | `/admin/backup` | **admin** | Downloads a consistent SQLite copy (`VACUUM INTO`) |
+| GET | `/admin/system` | **admin** | Schema version, counts, `runtime` (`Node.js v…` or `Cloudflare Workers`) |
+| GET | `/admin/backup` | **admin** | Downloads a consistent copy: SQLite file `.db` (`VACUUM INTO`) on Node.js, SQL dump `.sql` on Cloudflare |

@@ -4,7 +4,8 @@ import { createApp } from '../src/app.js';
 import { db } from '../src/db.js';
 import { LATEST_VERSION, migrate, schemaVersion } from '../src/migrations.js';
 import { hashPassword } from '../src/auth.js';
-import { initDatabase, setupToken } from '../src/seed.js';
+import { initDatabase } from '../src/db-node.js';
+import { setupToken } from '../src/seed.js';
 import { org } from '../src/settings.js';
 
 const app = createApp();
@@ -36,6 +37,13 @@ describe('First-run setup', () => {
     expect(db().value('SELECT COUNT(*) FROM users')).toBe(0);
   });
 
+  it('keeps the setup code in the database', async () => {
+    const code = setupToken();
+    // Stored, so a restart of the server (or of a Durable Object) shows the same code.
+    expect(db().value("SELECT value FROM kv WHERE key = 'setup_code'")).toBe(JSON.stringify(code));
+    expect(setupToken()).toBe(code);
+  });
+
   it('validates the organisation and administrator', async () => {
     const code = setupToken();
     const bad = await request(app).post('/api/setup').send({ setup_code: code, organisation: { name: 'Acme', state_code: '29', gstin: '27AAPFU0939F1ZV' }, admin: { name: 'A', email: 'a@example.com', password: 'long-enough-1' } });
@@ -63,6 +71,8 @@ describe('First-run setup', () => {
     expect(org().inventory_start_date).toMatch(/^\d{4}-04-01$/);
     expect(db().value('SELECT state_code FROM warehouses WHERE is_primary = 1')).toBe('27');
     expect((await request(app).get('/api/setup')).body.needs_setup).toBe(false);
+    // The one-time code is gone once used.
+    expect(db().value("SELECT COUNT(*) FROM kv WHERE key = 'setup_code'")).toBe(0);
   });
 });
 
@@ -75,8 +85,8 @@ describe('Schema migrations', () => {
   it('upgrades a database created by an older version', () => {
     const d = db();
     // Simulate an old database: drop a column added by migration 1 and reset the version.
-    d.raw.exec('ALTER TABLE users DROP COLUMN last_login_at');
-    d.raw.exec('PRAGMA user_version = 0');
+    d.exec('ALTER TABLE users DROP COLUMN last_login_at');
+    d.setSchemaVersion(0);
     expect(migrate(d)).toEqual([1, 2]);
     expect(d.all<{ name: string }>('PRAGMA table_info(users)').some((c) => c.name === 'last_login_at')).toBe(true);
   });
@@ -85,7 +95,7 @@ describe('Schema migrations', () => {
     const d = db();
     const role = d.value<number>('SELECT id FROM roles WHERE is_admin = 1');
     d.insert('users', { name: 'Old admin', email: 'legacy@example.com', password_hash: hashPassword('admin123'), role_id: role });
-    d.raw.exec('PRAGMA user_version = 1');
+    d.setSchemaVersion(1);
     expect(migrate(d)).toEqual([2]);
     expect(d.value('SELECT must_change_password FROM users WHERE email = ?', 'legacy@example.com')).toBe(1);
     expect(d.value('SELECT must_change_password FROM users WHERE email = ?', 'owner@acme.example')).toBe(0);

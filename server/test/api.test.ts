@@ -5,7 +5,8 @@ import { db } from '../src/db.js';
 import { gstr1, gstr3b } from '../src/gst.js';
 import { REPORTS, runReport, toCsv } from '../src/reports.js';
 import { resetLoginThrottle } from '../src/auth.js';
-import { completeSetup, initDatabase } from '../src/seed.js';
+import { initDatabase } from '../src/db-node.js';
+import { completeSetup } from '../src/seed.js';
 import { today, addDays } from '../src/util.js';
 import { loadSampleCompany, SAMPLE_USER_PASSWORD } from './fixtures/sample-company.js';
 

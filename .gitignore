@@ -7,3 +7,6 @@ data/
 test-results/
 playwright-report/
 .env
+.wrangler/
+.dev.vars
+worker-dist/

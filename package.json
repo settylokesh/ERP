@@ -3,14 +3,25 @@
   "private": true,
   "version": "1.0.0",
   "description": "Saral ERP - business management for Indian companies: double-entry accounting, GST compliance, inventory, sales, procurement, manufacturing and payroll.",
-  "workspaces": ["server", "web"],
-  "engines": { "node": ">=22.13" },
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "dev": "npm run dev --workspace server & npm run dev --workspace web",
     "build": "npm run build --workspace web && npm run build --workspace server",
     "start": "npm run start --workspace server",
     "test": "npm test --workspace server",
     "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace web",
-    "e2e": "npm run e2e --workspace web"
+    "e2e": "npm run e2e --workspace web",
+    "cf:dev": "npm run build --workspace web && wrangler dev",
+    "cf:deploy": "npm run build --workspace web && wrangler deploy"
+  },
+  "devDependencies": {
+    "iconv-lite-workers": "npm:iconv-lite@0.6.3",
+    "wrangler": "4.152.0"
   }
 }

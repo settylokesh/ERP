@@ -4,6 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
 import { createTransport, type Transporter } from 'nodemailer';
 import { db, json, type Row } from './db.js';
+import { onWorkers } from './runtime.js';
 import type { AuthUser } from './auth.js';
 
 export function audit(entity: string, entityId: number | null, action: string, summary: string, user?: AuthUser | null, data?: unknown) {
@@ -176,10 +177,16 @@ export function postWebhook(url: string, body: string): Promise<number> {
     const allowPrivate = process.env.WEBHOOK_ALLOW_PRIVATE === '1';
     const host = u.hostname.replace(/^\[|\]$/g, '');
     if (!allowPrivate && isIP(host) && isPrivateAddress(host)) return reject(new Error(PRIVATE_TARGET));
+    const headers = { 'content-type': 'application/json', 'user-agent': 'SaralERP-Webhook/1.0' };
+    if (onWorkers) {
+      // On Cloudflare, outbound requests leave through Cloudflare's network, which cannot reach private networks.
+      return fetch(u, { method: 'POST', headers, body, redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+        .then((r) => { void r.body?.cancel(); resolve(r.status); }, reject);
+    }
     const send = u.protocol === 'https:' ? httpsRequest : httpRequest;
     const req = send(u, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': 'SaralERP-Webhook/1.0' },
+      headers: { ...headers, 'content-length': Buffer.byteLength(body) },
       lookup: allowPrivate ? undefined : publicOnlyLookup,
       signal: AbortSignal.timeout(10_000),
     }, (res) => {

@@ -1,0 +1,21 @@
+// Cloudflare deployment: the web app as static assets, the API in a SQLite-backed Durable Object.
+// See documentation/25-cloudflare.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "saral-erp",
+  "main": "server/src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "ERP", "class_name": "ErpDatabase" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ErpDatabase"] }],
+  "observability": { "enabled": true },
+  // body-parser 1.x uses iconv-lite 0.4, whose browser build stubs out its streams module and fails in Workers.
+  "alias": { "iconv-lite": "iconv-lite-workers" }
+}
