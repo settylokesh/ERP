@@ -1,7 +1,9 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { SCHEMA } from './schema.js';
 
-export type Row = Record<string, any>;
+// Rows are dynamic SQL results; a loose type keeps spreads and joins ergonomic.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Row = any;
 type Param = string | number | bigint | null | Uint8Array;
 
 export class HttpError extends Error {

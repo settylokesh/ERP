@@ -397,10 +397,12 @@ export function refreshParent(parentId: number) {
   const p = d.get<Row>('SELECT * FROM documents WHERE id = ?', parentId);
   if (!p) return;
   const lines = d.all<Row>('SELECT * FROM document_lines WHERE document_id = ?', parentId);
-  const progress = (types: string[], statuses?: string[]) => {
+  const goods = new Set(d.all<{ id: number }>("SELECT id FROM items WHERE type = 'goods'").map((r) => r.id));
+  const progress = (types: string[], statuses?: string[], goodsOnly = false) => {
     let done = 0, total = 0;
     for (const l of lines) {
       if (!l.item_id && p.type !== 'purchase_order') continue;
+      if (goodsOnly && !goods.has(l.item_id)) continue;
       total += l.qty;
       done += Math.min(l.qty, consumedQty(l.id, types, undefined, statuses));
     }
@@ -408,7 +410,7 @@ export function refreshParent(parentId: number) {
   };
   const label = (ratio: number, none: string, part: string, all: string) => (ratio <= 1e-9 ? none : ratio >= 1 - 1e-9 ? all : part);
   if (p.type === 'sales_order') {
-    const shipped = progress(['package', 'delivery_challan'], ['shipped', 'delivered', 'open', 'invoiced']);
+    const shipped = progress(['package', 'delivery_challan'], ['shipped', 'delivered', 'open', 'invoiced'], true);
     const invoiced = progress(['invoice']);
     const fulfil_status = label(shipped, 'pending', 'partially_shipped', 'shipped');
     const billing_status = label(invoiced, 'not_invoiced', 'partially_invoiced', 'invoiced');
@@ -417,7 +419,7 @@ export function refreshParent(parentId: number) {
     else if (p.status === 'closed' && !json<Row>(p.data, {}).manually_closed && (shipped < 1 - 1e-9 || invoiced < 1 - 1e-9)) status = 'confirmed';
     d.update('documents', parentId, { fulfil_status, billing_status, status });
   } else if (p.type === 'purchase_order') {
-    const received = progress(['purchase_receive']);
+    const received = progress(['purchase_receive'], undefined, true);
     const billed = progress(['bill']);
     const fulfil_status = label(received, 'not_received', 'partially_received', 'received');
     const billing_status = label(billed, 'not_billed', 'partially_billed', 'billed');
@@ -705,6 +707,9 @@ export function convertDraft(fromId: number, toType: string, opts: Row = {}): Do
         tracking: ['credit_note', 'sales_return', 'vendor_credit', 'package', 'delivery_challan'].includes(toType) && tracking.length && qty === l.qty ? tracking : [],
       } as LineInput;
     }).filter((l): l is LineInput => !!l && (l.qty ?? 0) > 0);
+  }
+  if (['package', 'delivery_challan', 'purchase_receive', 'sales_return'].includes(toType)) {
+    lines = lines.filter((l) => l.item_id && d.value<string>('SELECT type FROM items WHERE id = ?', l.item_id) === 'goods');
   }
   if (!lines.length) fail(`Nothing left to convert from ${src.number}`, 422);
   let contact_id = sameParty ? src.contact_id : opts.contact_id ?? null;
