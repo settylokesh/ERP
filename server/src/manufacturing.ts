@@ -14,7 +14,7 @@ export function saveWorkCenter(input: Row, id?: number) {
   const name = String(input.name ?? '').trim() || fail('Work centre name is required', 422);
   const code = String(input.code ?? '').trim() || null;
   if (code && d.get('SELECT 1 FROM work_centers WHERE code = ? AND id <> ?', code, id ?? -1)) fail('Code already used', 409);
-  const row = { name, code, cost_per_hour: Math.max(0, Number(input.cost_per_hour) || 0), capacity_hours: Math.max(0.5, Number(input.capacity_hours) || 8), description: input.description ?? null, is_active: input.is_active === false ? 0 : 1 };
+  const row = { name, code, cost_per_hour: Math.max(0, Number(input.cost_per_hour) || 0), capacity_hours: Math.max(0.5, Number(input.capacity_hours) || 8), description: input.description ?? null, is_active: input.is_active === false || input.is_active === 0 ? 0 : 1 };
   if (id) { d.update('work_centers', id, row); return id; }
   return d.insert('work_centers', row);
 }
@@ -421,7 +421,7 @@ export function saveQualityRule(input: Row, id?: number) {
     if (!String(p.name ?? '').trim()) fail('Parameter name is required', 422);
     if (p.type === 'numeric' && p.min != null && p.max != null && Number(p.min) > Number(p.max)) fail(`Min exceeds max for ${p.name}`, 422);
   }
-  const row = { name: String(input.name ?? '').trim() || `${item.name} QC`, item_id: item.id, applies_to: ['manufacturing', 'purchase_receive', 'both'].includes(input.applies_to) ? input.applies_to : 'both', parameters: JSON.stringify(params), is_active: input.is_active === false ? 0 : 1 };
+  const row = { name: String(input.name ?? '').trim() || `${item.name} QC`, item_id: item.id, applies_to: ['manufacturing', 'purchase_receive', 'both'].includes(input.applies_to) ? input.applies_to : 'both', parameters: JSON.stringify(params), is_active: input.is_active === false || input.is_active === 0 ? 0 : 1 };
   if (id) { d.update('quality_rules', id, row); return id; }
   return d.insert('quality_rules', row);
 }

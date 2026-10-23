@@ -121,7 +121,7 @@ export function saveWorkflow(input: Row, id?: number) {
     if (!['notify', 'email', 'field_update', 'webhook'].includes(a.type)) fail(`Unknown action ${a.type}`, 422);
     if (a.type === 'webhook' && !/^https?:\/\//.test(a.url ?? '')) fail('Webhook URL must start with http(s)://', 422);
   }
-  const row = { name, module: input.module, trigger: input.trigger, conditions: JSON.stringify(input.conditions ?? []), actions: JSON.stringify(actions), is_active: input.is_active === false ? 0 : 1 };
+  const row = { name, module: input.module, trigger: input.trigger, conditions: JSON.stringify(input.conditions ?? []), actions: JSON.stringify(actions), is_active: input.is_active === false || input.is_active === 0 ? 0 : 1 };
   if (id) { db().update('workflow_rules', id, row); return id; }
   return db().insert('workflow_rules', row);
 }

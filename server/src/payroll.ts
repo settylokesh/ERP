@@ -39,8 +39,8 @@ export function saveEmployee(input: Row, user?: AuthUser, id?: number) {
     exit_date: input.exit_date || null, department_id: input.department_id || null, designation_id: input.designation_id || null, work_state, pan,
     uan: input.uan ?? null, esi_number: input.esi_number ?? null, bank_name: input.bank_name ?? null, bank_account: input.bank_account ?? null,
     ifsc: input.ifsc ? String(input.ifsc).toUpperCase() : null, annual_ctc, components: JSON.stringify(input.components ?? {}),
-    pf_enabled: input.pf_enabled === false ? 0 : 1, esi_enabled: input.esi_enabled === false ? 0 : 1, pt_enabled: input.pt_enabled === false ? 0 : 1,
-    tds_enabled: input.tds_enabled === false ? 0 : 1, status: input.exit_date ? 'exited' : input.status === 'inactive' ? 'inactive' : 'active',
+    pf_enabled: input.pf_enabled === false || input.pf_enabled === 0 ? 0 : 1, esi_enabled: input.esi_enabled === false || input.esi_enabled === 0 ? 0 : 1, pt_enabled: input.pt_enabled === false || input.pt_enabled === 0 ? 0 : 1,
+    tds_enabled: input.tds_enabled === false || input.tds_enabled === 0 ? 0 : 1, status: input.exit_date ? 'exited' : input.status === 'inactive' ? 'inactive' : 'active',
   };
   structure({ ...row, components: row.components }, payrollSettings(), row.doj); // validates the CTC split
   const eid = id ? (d.update('employees', id, row), id) : d.insert('employees', row);

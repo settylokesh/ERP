@@ -40,7 +40,7 @@ export function saveContact(input: Row, user?: AuthUser, id?: number) {
       payment_terms: Math.max(0, Number(input.payment_terms ?? existing?.payment_terms ?? 0) || 0),
       currency_code: input.currency_code ?? existing?.currency_code ?? 'INR', credit_limit: input.credit_limit === '' || input.credit_limit == null ? null : Number(input.credit_limit),
       price_list_id: input.price_list_id || null, opening_balance: r2(Number(input.opening_balance ?? existing?.opening_balance ?? 0)),
-      tds_section_id: input.tds_section_id || null, notes: str(input.notes), is_active: input.is_active === false ? 0 : 1,
+      tds_section_id: input.tds_section_id || null, notes: str(input.notes), is_active: input.is_active === false || input.is_active === 0 ? 0 : 1,
       custom: JSON.stringify(input.custom ?? json(existing?.custom, {})), updated_at: new Date().toISOString(),
     };
     if (!d.get('SELECT 1 FROM currencies WHERE code = ?', row.currency_code)) fail('Unknown currency', 422);
@@ -168,7 +168,7 @@ export function saveItem(input: Row, user?: AuthUser, id?: number) {
       inventory_account_id: track ? input.inventory_account_id || acct('inventory_asset') : null,
       track_inventory: track ? 1 : 0, tracking, reorder_level: Number(input.reorder_level ?? 0) || 0,
       preferred_vendor_id: input.preferred_vendor_id || null, opening_stock: JSON.stringify(opening),
-      description: str(input.description), is_active: input.is_active === false ? 0 : 1,
+      description: str(input.description), is_active: input.is_active === false || input.is_active === 0 ? 0 : 1,
       custom: JSON.stringify(input.custom ?? json(existing?.custom, {})), updated_at: new Date().toISOString(),
     };
     if (row.sales_rate < 0 || row.purchase_rate < 0) fail('Rates cannot be negative', 422);
@@ -272,7 +272,7 @@ export function saveAccount(input: Row, user?: AuthUser, id?: number) {
   const row = {
     code, name, type, parent_id: input.parent_id || null, description: str(input.description),
     bank_name: str(input.bank_name), account_number: str(input.account_number), ifsc: str(input.ifsc)?.toUpperCase() ?? null,
-    currency_code: input.currency_code ?? existing?.currency_code ?? 'INR', is_active: input.is_active === false ? 0 : 1,
+    currency_code: input.currency_code ?? existing?.currency_code ?? 'INR', is_active: input.is_active === false || input.is_active === 0 ? 0 : 1,
   };
   if (row.ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(row.ifsc)) fail('IFSC format is invalid', 422);
   if (existing?.system_key && !row.is_active) fail('System accounts cannot be deactivated', 422);
@@ -301,7 +301,7 @@ export function saveWarehouse(input: Row, id?: number) {
     const err = validateGstin(input.gstin);
     if (err) fail(err, 422);
   }
-  const row = { name, code: str(input.code), address: str(input.address), state_code: input.state_code || (input.gstin ? String(input.gstin).slice(0, 2) : null), gstin: str(input.gstin)?.toUpperCase() ?? null, is_active: input.is_active === false ? 0 : 1, is_primary: input.is_primary ? 1 : 0 };
+  const row = { name, code: str(input.code), address: str(input.address), state_code: input.state_code || (input.gstin ? String(input.gstin).slice(0, 2) : null), gstin: str(input.gstin)?.toUpperCase() ?? null, is_active: input.is_active === false || input.is_active === 0 ? 0 : 1, is_primary: input.is_primary ? 1 : 0 };
   if (row.state_code && !STATES[row.state_code]) fail('Invalid state', 422);
   return d.tx(() => {
     if (row.is_primary) d.run('UPDATE warehouses SET is_primary = 0');
@@ -318,7 +318,7 @@ export function saveTax(input: Row, id?: number) {
   const name = str(input.name) ?? fail('Tax name is required', 422);
   const rate = Number(input.rate);
   if (!(rate >= 0 && rate <= 100)) fail('Rate must be between 0 and 100', 422);
-  const row = { name, rate, kind: 'gst', is_active: input.is_active === false ? 0 : 1 };
+  const row = { name, rate, kind: 'gst', is_active: input.is_active === false || input.is_active === 0 ? 0 : 1 };
   if (id) {
     if (rate !== db().value<number>('SELECT rate FROM taxes WHERE id = ?', id) && db().get('SELECT 1 FROM document_lines WHERE tax_id = ?', id)) fail('The rate of a tax used in transactions cannot change. Create a new tax instead.', 422);
     db().update('taxes', id, row);
@@ -331,7 +331,7 @@ export function savePriceList(input: Row, id?: number) {
   const d = db();
   const name = str(input.name) ?? fail('Price list name is required', 422);
   const mode = input.mode === 'per_item' ? 'per_item' : 'percentage';
-  const row = { name, kind: input.kind === 'purchase' ? 'purchase' : 'sales', mode, percentage: Number(input.percentage ?? 0) || 0, description: str(input.description), is_active: input.is_active === false ? 0 : 1 };
+  const row = { name, kind: input.kind === 'purchase' ? 'purchase' : 'sales', mode, percentage: Number(input.percentage ?? 0) || 0, description: str(input.description), is_active: input.is_active === false || input.is_active === 0 ? 0 : 1 };
   if (row.percentage <= -100) fail('Markdown cannot be 100% or more', 422);
   return d.tx(() => {
     const pid = id ? (d.update('price_lists', id, row), id) : d.insert('price_lists', row);
