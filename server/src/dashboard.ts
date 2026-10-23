@@ -76,7 +76,11 @@ export function dashboard(user?: AuthUser) {
   const billsDueSoon = d.all<Row>(`SELECT id, number, due_date, balance FROM documents WHERE type = 'bill' AND status IN ('open','partially_paid') AND due_date BETWEEN ? AND ? ORDER BY due_date`, t, addDays(t, 7));
   const uncategorized = count("SELECT COUNT(*) FROM bank_statement_lines WHERE status = 'uncategorized'");
   const thisMonth = t.slice(0, 7);
-  const prevMonth = addMonths(`${thisMonth}-01`, -1).slice(0, 7);
+  const day = Number(t.slice(8, 10));
+  // Monthly filers: GSTR-1 by the 11th and GSTR-3B by the 20th of the following month.
+  const returnPeriod = day > 20 ? thisMonth : addMonths(`${thisMonth}-01`, -1).slice(0, 7);
+  const dueMonth = addMonths(`${returnPeriod}-01`, 1).slice(0, 7);
+  const label = (p: string) => new Date(`${p}-01T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' });
   const insights: { level: 'info' | 'warning' | 'critical'; text: string; link?: string }[] = [];
   if (receivables.total - receivables.current > 0) insights.push({ level: 'warning', text: `₹${r2(receivables.total - receivables.current).toLocaleString('en-IN')} of receivables is overdue across ${count("SELECT COUNT(*) FROM documents WHERE type = 'invoice' AND status IN ('open','partially_paid') AND due_date < ?", t)} invoice(s).`, link: '/docs/invoice?status=overdue' });
   if (billsDueSoon.length) insights.push({ level: 'info', text: `${billsDueSoon.length} bill(s) totalling ₹${r2(billsDueSoon.reduce((a, b) => a + b.balance, 0)).toLocaleString('en-IN')} fall due in the next 7 days.`, link: '/docs/bill?status=unpaid' });
@@ -84,7 +88,9 @@ export function dashboard(user?: AuthUser) {
   if (pendingApprovals.length) insights.push({ level: 'info', text: `${pendingApprovals.length} transaction(s) are waiting for approval.` });
   if (uncategorized) insights.push({ level: 'info', text: `${uncategorized} bank statement line(s) need to be categorised or matched.`, link: '/banking' });
   if (o.gstin) {
-    insights.push({ level: 'info', text: `GSTR-1 for ${prevMonth} is due on ${thisMonth}-11 and GSTR-3B on ${thisMonth}-20 (monthly filers).`, link: `/compliance/gstr1?period=${prevMonth}` });
+    const r1 = `${dueMonth}-11`, r3 = `${dueMonth}-20`;
+    const parts = [r1 >= t ? `GSTR-1 by ${r1}` : null, `GSTR-3B by ${r3}`].filter(Boolean).join(' and ');
+    insights.push({ level: 'info', text: `${label(returnPeriod)} returns: file ${parts} (monthly filers).`, link: `/compliance/gstr3b` });
   }
   const cashBurn = monthly.length >= 2 ? r2(monthly.slice(-3).reduce((a, m) => a + (m.cash_out - m.cash_in), 0) / Math.min(3, monthly.length)) : 0;
   const cashNow = banks.filter((b) => b.type !== 'credit_card').reduce((a, b) => a + b.balance, 0);

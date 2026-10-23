@@ -175,12 +175,24 @@ export function replaceJournal(sourceType: string, sourceId: number, spec: Omit<
     `SELECT jl.account_id, jl.recon_id FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id
      WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL`, sourceType, sourceId)) recon.set(r.account_id, r.recon_id);
   d.run('DELETE FROM journals WHERE source_type = ? AND source_id = ?', sourceType, sourceId);
-  if (!spec) return null;
+  if (!spec) {
+    // The transaction left the books: release any bank statement line matched to it.
+    d.run(`UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL
+           WHERE matched_source_type = ? AND matched_source_id = ?`, sourceType, sourceId);
+    return null;
+  }
   const id = postJournal({ ...spec, source_type: sourceType, source_id: sourceId });
   if (id && recon.size) {
     for (const [account, rid] of recon) d.run('UPDATE journal_lines SET recon_id = ? WHERE journal_id = ? AND account_id = ?', rid, id, account);
   }
   return id;
+}
+
+export function assertNotReconciled(sourceType: string, sourceId: number) {
+  const hit = db().get(
+    `SELECT 1 FROM journal_lines jl JOIN journals j ON j.id = jl.journal_id WHERE j.source_type = ? AND j.source_id = ? AND jl.recon_id IS NOT NULL`,
+    sourceType, sourceId);
+  if (hit) fail('This transaction is part of a completed bank reconciliation. Undo the reconciliation first.', 422);
 }
 
 export function journalsFor(sourceType: string, sourceId: number) {

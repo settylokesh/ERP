@@ -603,7 +603,9 @@ export function reportCatalog() {
 
 export function toCsv(r: ReportResult): string {
   const esc = (v: unknown) => {
-    const s = v == null ? '' : String(v);
+    let s = v == null ? '' : String(v);
+    // Neutralise spreadsheet formulas in text cells (CSV injection); plain numbers stay numeric.
+    if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines: string[] = [r.title, r.subtitle ?? ''];

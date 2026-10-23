@@ -6,7 +6,7 @@ import { applyCredits } from '../payments.js';
 import { org } from '../settings.js';
 import { addDays, fiscalYear, isDate, isRegistered, r2, today, validateGstin } from '../util.js';
 import {
-  approveDocument, createDocument, createFrom, emailDocument, getDocument, rejectDocument, setStatus, submitDocument, voidDocument,
+  approveDocument, createDocument, createFrom, emailDocument, getDocument, refreshParent, rejectDocument, setStatus, submitDocument, voidDocument,
 } from './engine.js';
 import { loadFull } from './posting.js';
 import { docType } from './types.js';
@@ -263,6 +263,7 @@ export const ACTIONS: Record<string, ActionDef> = {
     run: (doc, b, u) => {
       if (b.warehouse_id) db().update('documents', doc.id, { warehouse_id: Number(b.warehouse_id) });
       setStatus(doc.id, 'received', u, { received_date: b.date ?? today() }, 'received');
+      refreshParent(doc.id);
     },
   },
   mark_delivered: { label: 'Mark as Delivered', types: ['delivery_challan'], when: st('open'), perm: 'edit', run: (doc, _b, u) => setStatus(doc.id, 'delivered', u) },

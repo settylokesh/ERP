@@ -137,7 +137,7 @@ export function LineItems({ type, lines, setLines, priced, side, kind, inclusive
             {type === 'purchase_receive' && <th className="num w-28">Accepted</th>}
             {showRate && <th className="num w-32">{type === 'inventory_adjustment' ? 'Unit Cost (in)' : type === 'purchase_request' ? 'Est. Rate' : 'Rate'}</th>}
             {priced && <th className="num w-20">Disc %</th>}
-            {priced && <th className="w-28">Tax</th>}
+            {priced && <th className="w-32">Tax</th>}
             {(priced || showRate) && <th className="num w-32">Amount</th>}
             <th className="w-20" />
           </tr>
@@ -161,7 +161,7 @@ export function LineItems({ type, lines, setLines, priced, side, kind, inclusive
                     {needsTracking && <button className="inline-flex items-center gap-1 text-xs text-brand-600" onClick={() => setTracking(i)}><ListChecks className="h-3.5 w-3.5" />{it.tracking === 'serial' ? 'Serial numbers' : 'Batches'} ({(l.tracking ?? []).length})</button>}
                     {(type === 'bill' || type === 'expense' || type === 'vendor_credit') && priced && <Check label={<span className="text-xs">ITC eligible</span>} checked={l.itc_eligible !== false} onChange={(v) => update(i, { itc_eligible: v })} />}
                     {type === 'bill' && !l.item_id && <Check label={<span className="text-xs">Landed cost</span>} checked={!!l.data?.landed_cost} onChange={(v) => update(i, { data: { ...l.data, landed_cost: v } })} />}
-                    {type === 'credit_note' && it?.track_inventory ? <Check label={<span className="text-xs">Return to stock</span>} checked={l.data?.return_to_stock !== false} onChange={(v) => update(i, { data: { ...l.data, return_to_stock: v } })} /> : null}
+                    {(type === 'credit_note' || type === 'vendor_credit') && it?.track_inventory ? <Check label={<span className="text-xs">{type === 'credit_note' ? 'Return to stock' : 'Goods returned to vendor'}</span>} checked={l.data?.return_to_stock !== false} onChange={(v) => update(i, { data: { ...l.data, return_to_stock: v } })} /> : null}
                   </div>
                 </td>
                 {priced && <td><input className="input" value={l.hsn_code ?? ''} onChange={(e) => update(i, { hsn_code: e.target.value })} aria-label="HSN/SAC" /></td>}

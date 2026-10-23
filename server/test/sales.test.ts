@@ -125,6 +125,20 @@ describe('Order to cash', () => {
   });
 });
 
+describe('Sales return ordering', () => {
+  it('keeps an unreceived return out of physical stock even after a credit note', () => {
+    const inv = sell(c, 5, 200, '2026-05-01');
+    const rma = createFrom(inv, 'sales_return', c.admin, { date: '2026-05-02' });
+    createFrom(rma, 'credit_note', c.admin, { date: '2026-05-03' });
+    expect(doc(rma).status).toBe('approved');
+    expect(stock(c.widget)).toBe(45);
+    runAction(rma, 'receive_return', { date: '2026-05-04' }, c.admin);
+    expect(doc(rma).status).toBe('credited');
+    expect(stock(c.widget)).toBe(50);
+    expect(inventoryReconciles()).toBe(true);
+  });
+});
+
 describe('Payments received', () => {
   it('tracks partial and full payments and bank charges', () => {
     const inv = sell(c, 5, 200, '2026-05-01');

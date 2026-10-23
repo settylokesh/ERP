@@ -82,9 +82,21 @@ export function assertCan(user: AuthUser | undefined, module: PermModule | strin
   if (!can(user, module, action)) fail(`You do not have permission to ${action} ${module}`, 403);
 }
 
+const failures = new Map<string, { count: number; until: number }>();
+const MAX_FAILURES = 8;
+const LOCK_MS = 15 * 60 * 1000;
+
 export function login(email: string, password: string) {
-  const u = db().get<Row>('SELECT * FROM users WHERE email = ?', String(email ?? '').trim());
-  if (!u || !u.is_active || !verifyPassword(String(password ?? ''), u.password_hash)) fail('Invalid email or password', 401);
+  const key = String(email ?? '').trim().toLowerCase();
+  const f = failures.get(key);
+  if (f && f.count >= MAX_FAILURES && Date.now() < f.until) fail('Too many failed sign-in attempts. Try again in 15 minutes.', 429);
+  const u = db().get<Row>('SELECT * FROM users WHERE email = ?', key);
+  if (!u || !u.is_active || !verifyPassword(String(password ?? ''), u.password_hash)) {
+    const cur = f && Date.now() < f.until ? f : { count: 0, until: 0 };
+    failures.set(key, { count: cur.count + 1, until: Date.now() + LOCK_MS });
+    fail('Invalid email or password', 401);
+  }
+  failures.delete(key);
   const token = randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + 7 * 86400000).toISOString();
   db().insert('sessions', { token, user_id: u!.id, expires_at: expires });
@@ -106,7 +118,8 @@ declare global {
 
 export function authMiddleware(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : typeof req.query.token === 'string' ? req.query.token : '';
+  // Tokens are only accepted in the Authorization header, never in URLs (which leak into logs and history).
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!token) return next(fail('Not signed in', 401));
   const s = db().get<Row>('SELECT * FROM sessions WHERE token = ?', token);
   if (!s || s.expires_at < new Date().toISOString()) return next(fail('Session expired. Please sign in again.', 401));

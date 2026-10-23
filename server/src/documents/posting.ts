@@ -71,7 +71,11 @@ export function buildMoves(doc: FullDoc): MoveSpec[] {
       break;
     }
     case 'vendor_credit':
-      for (const l of stockLines) add(l, { warehouse_id: wh(l), date: doc.date, qty: -l.qty, kind: 'return_out', physical: true, accounting: true }, true);
+      // Lines marked as price corrections (return_to_stock = false) do not move goods.
+      for (const l of stockLines) {
+        if (json<Row>(l.data, {}).return_to_stock === false) continue;
+        add(l, { warehouse_id: wh(l), date: doc.date, qty: -l.qty, kind: 'return_out', physical: true, accounting: true }, true);
+      }
       break;
     case 'package': {
       const shipDate = data.shipment?.date || doc.date;

@@ -6,7 +6,8 @@ export interface Col<T> { key: string; label: string; render?: (row: T) => React
 
 export function toCsv<T>(cols: Col<T>[], rows: T[]) {
   const esc = (v: unknown) => {
-    const s = v == null ? '' : String(v);
+    let s = v == null ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`; // CSV formula injection guard
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return [cols.map((c) => esc(c.label)).join(','), ...rows.map((r: any) => cols.map((c) => esc(c.csv ? c.csv(r) : r[c.key])).join(','))].join('\n');

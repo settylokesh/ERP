@@ -1,7 +1,7 @@
 import { audit, history, notify, queueEmail, runWorkflows, usersInRoles, adminUsers } from '../activity.js';
 import { assertCan, can, type AuthUser } from '../auth.js';
 import { db, fail, json, type Row } from '../db.js';
-import { journalsFor } from '../ledger.js';
+import { assertNotReconciled, journalsFor } from '../ledger.js';
 import { assertUnlocked, getKv, nextNumber, org } from '../settings.js';
 import { computeTaxLine, computeTds, supplyKind } from '../tax.js';
 import { addDays, isDate, r2, today, num, STATES } from '../util.js';
@@ -330,6 +330,7 @@ export function updateDocument(id: number, input: DocInput, user: AuthUser | und
     }
     const ed = json<Row>(existing.data, {});
     if (ed.einvoice?.status === 'generated') fail('Cancel the e-invoice (IRN) before editing this document', 422);
+    assertNotReconciled(existing.type, id);
     assertUnlocked(def.lock, existing.date, def.label);
     const { header, lines } = prepare(existing.type, input, existing);
     assertUnlocked(def.lock, header.date, def.label);
@@ -437,7 +438,9 @@ export function refreshParent(parentId: number) {
     } else if (p.type === 'purchase_request' && (has('purchase_order') || has('rfq'))) status = 'ordered';
     else if (p.type === 'rfq' && has('purchase_order')) status = 'ordered';
     else if (p.type === 'delivery_challan' && has('invoice')) status = 'invoiced';
-    else if (p.type === 'sales_return' && has('credit_note')) status = 'credited';
+    // A return only counts as credited once the goods are physically back.
+    else if (p.type === 'sales_return' && has('credit_note') && p.status === 'received') status = 'credited';
+    else if (p.type === 'sales_return' && !has('credit_note') && p.status === 'credited') status = 'received';
     else if (p.type === 'stock_count' && has('inventory_adjustment')) status = 'completed';
     if (status !== p.status) d.update('documents', parentId, { status });
   }
@@ -580,6 +583,7 @@ export function deleteDocument(id: number, user?: AuthUser) {
     if (paidAmount(id) > 0 || creditUsed(id) > 0) fail('Remove payments, applied credits and refunds before deleting', 422);
     if (json<Row>(doc.data, {}).einvoice?.status === 'generated') fail('Cancel the e-invoice before deleting', 422);
     if (db().get("SELECT 1 FROM manufacturing_orders WHERE sales_order_id = ? AND status <> 'cancelled'", id)) fail('Cancel linked manufacturing orders first', 422);
+    assertNotReconciled(doc.type, id);
     db().run("DELETE FROM credit_applications WHERE credit_doc_id = ? OR document_id = ?", id, id);
     db().update('documents', id, { status: 'void' });
     syncPosting(id); // removes stock moves and journals
@@ -597,8 +601,9 @@ export function voidDocument(id: number, user?: AuthUser, reason?: string) {
     if (doc.status === 'void') fail('Already void', 422);
     assertUnlocked(def.lock, doc.date, def.label);
     if (paidAmount(id) > 0 || creditUsed(id) > 0) fail('Remove payments, applied credits and refunds before voiding', 422);
-    const kids = db().value<number>("SELECT COUNT(*) FROM documents WHERE ref_doc_id = ? AND status <> 'void' AND type <> 'package'", id);
-    if (kids && doc.type !== 'invoice') fail('Void the linked transactions first', 422);
+    const kids = db().value<number>("SELECT COUNT(*) FROM documents WHERE ref_doc_id = ? AND status <> 'void'", id);
+    if (kids) fail('Void or delete the linked transactions first', 422);
+    assertNotReconciled(doc.type, id);
     if (json<Row>(doc.data, {}).einvoice?.status === 'generated') fail('Cancel the e-invoice (IRN) before voiding', 422);
     const data = { ...json<Row>(doc.data, {}), void_reason: reason ?? null };
     db().update('documents', id, { status: 'void', balance: 0, data: JSON.stringify(data) });

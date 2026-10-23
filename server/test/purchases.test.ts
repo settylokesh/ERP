@@ -88,6 +88,16 @@ describe('Procure to pay', () => {
     expect(trialBalanced()).toBe(true);
   });
 
+  it('lets vendor credits correct price without moving stock', () => {
+    const b = createDocument('bill', { date: '2026-05-01', contact_id: c.vendor, lines: [{ item_id: c.widget, qty: 10, rate: 100, tax_id: c.tax18 }] }, c.admin, { submit: true });
+    const line = db().get('SELECT * FROM document_lines WHERE document_id = ?', b);
+    createDocument('vendor_credit', { date: '2026-05-03', contact_id: c.vendor, ref_doc_id: b, lines: [{ item_id: c.widget, qty: 10, rate: 5, tax_id: c.tax18, ref_line_id: line.id, data: { return_to_stock: false } }] }, c.admin, { submit: true });
+    expect(stock(c.widget)).toBe(10);
+    expect(bal('inventory_asset')).toBe(1000);
+    expect(bal('accounts_payable')).toBe(1180 - 59);
+    expect(trialBalanced()).toBe(true);
+  });
+
   it('holds stock from receives that need quality inspection', () => {
     saveQualityRule({ item_id: c.widget, applies_to: 'purchase_receive', parameters: [{ name: 'Visual', type: 'pass_fail' }] });
     const po = createDocument('purchase_order', { date: '2026-05-01', contact_id: c.vendor, lines: [{ item_id: c.widget, qty: 10, rate: 100 }] }, c.admin, { submit: true });

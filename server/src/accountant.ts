@@ -54,6 +54,7 @@ export function deleteManualJournal(id: number, user?: AuthUser) {
   const j = d.get<Row>('SELECT * FROM journals WHERE id = ? AND is_manual = 1', id) ?? fail('Journal not found', 404);
   assertUnlocked('accountant', j.date, 'journal');
   if (d.get('SELECT 1 FROM journal_lines WHERE journal_id = ? AND recon_id IS NOT NULL', id)) fail('Undo the bank reconciliation first', 422);
+  d.run("UPDATE bank_statement_lines SET status = 'uncategorized', matched_source_type = NULL, matched_source_id = NULL WHERE matched_source_type = 'manual_journal' AND matched_source_id = ?", id);
   d.run('DELETE FROM journals WHERE id = ?', id);
   audit('journal', id, 'deleted', `Manual journal ${j.number} deleted`, user);
 }

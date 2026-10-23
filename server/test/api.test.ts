@@ -4,7 +4,7 @@ import { createApp } from '../src/app.js';
 import { db } from '../src/db.js';
 import { seedDemo } from '../src/demo.js';
 import { gstr1, gstr3b } from '../src/gst.js';
-import { REPORTS, runReport } from '../src/reports.js';
+import { REPORTS, runReport, toCsv } from '../src/reports.js';
 import { initDatabase } from '../src/seed.js';
 import { today, addDays } from '../src/util.js';
 
@@ -76,6 +76,21 @@ describe('API', () => {
     const res = await request(app).post('/api/docs/invoice').set(auth()).send({ lines: [] });
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/Customer is required/);
+  });
+
+  it('throttles repeated failed logins', async () => {
+    for (let i = 0; i < 8; i++) await request(app).post('/api/auth/login').send({ email: 'hr@saral.local', password: 'wrong' });
+    const r = await request(app).post('/api/auth/login').send({ email: 'hr@saral.local', password: 'demo1234' });
+    expect(r.status).toBe(429);
+  });
+
+  it('does not accept session tokens in the URL', async () => {
+    expect((await request(app).get(`/api/dashboard?token=${token}`)).status).toBe(401);
+  });
+
+  it('neutralises spreadsheet formulas in CSV exports', () => {
+    const csv = toCsv({ title: 'T', columns: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }], rows: [{ a: '=HYPERLINK("x")', b: -12.5 }] });
+    expect(csv).toContain(`"'=HYPERLINK(""x"")",-12.5`);
   });
 
   it('enforces role permissions', async () => {

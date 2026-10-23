@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { disposeAsset, registerAsset, runDepreciation, saveAsset, saveManualJournal, depreciationSchedule } from '../src/accountant.js';
 import { categorizeLine, completeReconciliation, importStatement, matchSuggestions, matchLine, reconciliationData, saveBankTransaction, statementLines } from '../src/banking.js';
 import { db } from '../src/db.js';
-import { createDocument } from '../src/documents/engine.js';
+import { createDocument, updateDocument } from '../src/documents/engine.js';
 import { acct } from '../src/ledger.js';
 import { completeMo, confirmMo, createInspection, jobCardAction, materialAvailability, mrp, recordInspection, saveBom, saveMo, saveQualityRule, saveWorkCenter, getMo } from '../src/manufacturing.js';
 import { saveItem } from '../src/masters.js';
-import { createPayment } from '../src/payments.js';
+import { createPayment, deletePayment } from '../src/payments.js';
 import { annualTax, approvePayRun, computePayslip, createPayRun, getPayRun, recordPayRunPayment, saveEmployee, structure } from '../src/payroll.js';
 import { payrollSettings } from '../src/settings.js';
 import { bal, buy, fresh, inventoryReconciles, stock, trialBalanced, type Ctx } from './helpers.js';
@@ -175,6 +175,20 @@ describe('Banking', () => {
     expect(() => completeReconciliation({ account_id: c.bank, end_date: '2026-05-31', closing_balance: 1000, cleared_line_ids: data.lines.map((l) => l.id) }, c.admin)).toThrow(/does not match/);
     completeReconciliation({ account_id: c.bank, end_date: '2026-05-31', closing_balance: 1130, cleared_line_ids: data.lines.map((l) => l.id) }, c.admin);
     expect(reconciliationData(c.bank, '2026-06-30').lines).toHaveLength(0);
+  });
+
+  it('blocks editing reconciled expenses and frees statement matches when a payment is deleted', () => {
+    const exp = createDocument('expense', { date: '2026-05-01', data: { paid_through_account_id: c.bank }, lines: [{ account_id: acct('rent'), qty: 1, rate: 1000 }] }, c.admin, { submit: true });
+    const lines = reconciliationData(c.bank, '2026-05-31').lines;
+    completeReconciliation({ account_id: c.bank, end_date: '2026-05-31', closing_balance: -1000, cleared_line_ids: lines.map((l) => l.id) }, c.admin);
+    expect(() => updateDocument(exp, { date: '2026-05-01', data: { paid_through_account_id: c.bank }, lines: [{ account_id: acct('rent'), qty: 1, rate: 2000 }] }, c.admin)).toThrow(/reconciliation/);
+    const inv = createDocument('invoice', { date: '2026-06-01', contact_id: c.cust, lines: [{ item_id: c.service, qty: 1, rate: 100 }] }, c.admin, { submit: true });
+    const p = createPayment({ kind: 'received', date: '2026-06-02', contact_id: c.cust, amount: 118, account_id: c.bank, allocations: [{ document_id: inv, amount: 118 }] }, c.admin);
+    importStatement(c.bank, 'Date,Description,Amount\n2026-06-02,Receipt,118', c.admin);
+    const line = statementLines(c.bank)[0];
+    matchLine(line.id, 'payment', p, c.admin);
+    deletePayment(p, c.admin);
+    expect(statementLines(c.bank)[0].status).toBe('uncategorized');
   });
 
   it('records transfers and owner contributions', () => {
